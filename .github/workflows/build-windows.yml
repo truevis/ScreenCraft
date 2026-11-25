@@ -1,0 +1,108 @@
+name: Build Windows installer
+
+on:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    name: windows-installer
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout fork branch
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ci/windows-installer
+          fetch-depth: 0
+
+      - name: Confirm tree matches pinned upstream SHA
+        shell: pwsh
+        run: |
+          $pin = "743e8cddbb16e0fa6e4ab6b3e25075c519af5a29"
+          git rev-parse --verify "${pin}^{commit}" | Out-Null
+          $base = (git merge-base HEAD $pin).Trim()
+          if ($base -ne $pin) {
+            Write-Error "merge-base $base is not the pinned SHA $pin"
+            exit 1
+          }
+          $names = @(git diff --name-only $pin HEAD)
+          $allowed = ".github/workflows/build-windows.yml"
+          $unexpected = @($names | Where-Object { $_ -ne $allowed })
+          if ($names.Count -ne 1 -or $unexpected.Count -ne 0) {
+            Write-Error "Tree differs from pin by more than the workflow: $($names -join ', ')"
+            exit 1
+          }
+          @"
+          ## Pinned upstream
+
+          $pin
+          "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - name: Rust stable (MSVC host)
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+
+      - name: Detect CMake
+        id: cmake
+        shell: pwsh
+        run: |
+          if (Get-Command cmake -ErrorAction SilentlyContinue) {
+            cmake --version
+            "needed=false" >> $env:GITHUB_OUTPUT
+          } else {
+            "needed=true" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Install CMake
+        if: steps.cmake.outputs.needed == 'true'
+        uses: lukka/get-cmake@v4.5.1
+
+      - name: Install LLVM and NSIS
+        shell: pwsh
+        run: |
+          function Install-Winget {
+            param([string]$Id)
+            winget install --exact --id $Id --scope machine --accept-package-agreements --accept-source-agreements --disable-interactivity
+            if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) {
+              throw "winget install $Id failed: $LASTEXITCODE"
+            }
+          }
+          Install-Winget -Id LLVM.LLVM
+          Install-Winget -Id NSIS.NSIS
+          $llvm = "C:\Program Files\LLVM\bin"
+          $nsis = Join-Path ${env:ProgramFiles(x86)} "NSIS"
+          if (-not (Test-Path (Join-Path $llvm "libclang.dll"))) { throw "libclang.dll not found under $llvm" }
+          if (-not (Test-Path (Join-Path $nsis "makensis.exe"))) { throw "makensis.exe not found under $nsis" }
+          $machine = [Environment]::GetEnvironmentVariable("Path", "Machine")
+          $user = [Environment]::GetEnvironmentVariable("Path", "User")
+          "PATH=$llvm;$nsis;$machine;$user" >> $env:GITHUB_ENV
+          "LIBCLANG_PATH=$llvm" >> $env:GITHUB_ENV
+          & (Join-Path $llvm "clang.exe") --version
+          & (Join-Path $nsis "makensis.exe") /VERSION
+
+      - name: Build installer
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1
+
+      - name: Write SHA256SUMS.txt
+        shell: pwsh
+        run: |
+          $exe = "screencraft_0_4_0.exe"
+          if (-not (Test-Path $exe)) { throw "missing $exe" }
+          $len = (Get-Item $exe).Length
+          if ($len -le 0) { throw "installer is empty" }
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  $exe" | Set-Content -Path SHA256SUMS.txt -Encoding ascii
+          Get-Content SHA256SUMS.txt
+          Write-Host "bytes=$len"
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: screencraft-windows-installer
+          path: |
+            screencraft_0_4_0.exe
+            SHA256SUMS.txt
+          if-no-files-found: error
