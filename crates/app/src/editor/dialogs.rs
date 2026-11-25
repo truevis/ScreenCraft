@@ -194,6 +194,8 @@ fn projects_menu(st: &mut EditorState, ctx: &egui::Context) {
     let mut open: Option<std::path::PathBuf> = None;
     let mut reveal_it = false;
     let mut reveal_root = false;
+    let mut footage: Option<super::FootageRequest> = None;
+    let (mut pick_open, mut pick_add) = (false, false);
     let outside = {
         // anchored under the button, left-aligned like the original
         let mut o = false;
@@ -209,15 +211,29 @@ fn projects_menu(st: &mut EditorState, ctx: &egui::Context) {
                     ui.set_max_width(320.0);
                     ui.spacing_mut().item_spacing = Vec2::ZERO;
                     let mut m = Menu { ui };
+                    m.header("Record");
+                    if m.item("New recording") {
+                        footage = Some(super::FootageRequest::NewRecording);
+                    }
+                    if m.item("Record more for this project") {
+                        footage = Some(super::FootageRequest::RecordMore);
+                    }
+                    if m.item("Add a recording or video to this project…") {
+                        pick_add = true;
+                    }
+                    m.hr();
                     m.header("Recent Projects");
-                    for (pkg, _) in list.iter().take(8) {
+                    for (pkg, _) in list.iter().filter(|(p, _)| p.dir != dir).take(8) {
                         let name = pkg.load_project().map(|p| p.name).unwrap_or_else(|_| pkg.dir.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default());
                         if m.item(&name) {
                             open = Some(pkg.dir.clone());
                         }
                     }
-                    if list.is_empty() {
-                        m.item("No projects yet");
+                    if list.iter().all(|(p, _)| p.dir == dir) {
+                        m.item("No other projects yet");
+                    }
+                    if m.item("Open project…") {
+                        pick_open = true;
                     }
                     m.hr();
                     if m.item("Show this project in the file manager") {
@@ -237,7 +253,20 @@ fn projects_menu(st: &mut EditorState, ctx: &egui::Context) {
         }
         o
     };
-    if let Some(d) = open {
+    if let Some(f) = footage {
+        st.dialogs.projects = false;
+        st.footage_request = Some(f);
+    } else if pick_open {
+        st.dialogs.projects = false;
+        if let Some(d) = pick_project(&root) {
+            st.open_request = Some(d);
+        }
+    } else if pick_add {
+        st.dialogs.projects = false;
+        if let Some(p) = pick_footage(&root) {
+            st.footage_request = Some(super::FootageRequest::Add(p));
+        }
+    } else if let Some(d) = open {
         st.dialogs.projects = false;
         st.open_request = Some(d);
     } else if reveal_it {
@@ -426,6 +455,28 @@ fn raw_menu(st: &mut EditorState, ctx: &egui::Context) {
     } else if outside {
         st.dialogs.raw = false;
     }
+}
+
+/// Ask for a project: its `project.json` (or any file in its `.screencraft` folder). Returns the folder.
+pub fn pick_project(root: &std::path::Path) -> Option<std::path::PathBuf> {
+    let f = rfd::FileDialog::new().set_title("Open a ScreenCraft project (pick project.json inside its .screencraft folder)").set_directory(root).add_filter("ScreenCraft project", &["json"]).pick_file()?;
+    project_dir_of(&f)
+}
+
+/// The `.screencraft` folder a picked file belongs to, if any.
+pub fn project_dir_of(f: &std::path::Path) -> Option<std::path::PathBuf> {
+    let d = if f.is_dir() { f.to_path_buf() } else { f.parent()?.to_path_buf() };
+    d.join("project.json").exists().then_some(d)
+}
+
+/// Ask for footage to add: an MP4, or a file of another recording (its project.json or screen video).
+pub fn pick_footage(root: &std::path::Path) -> Option<std::path::PathBuf> {
+    let f = rfd::FileDialog::new()
+        .set_title("Add a video, or another recording's project.json")
+        .set_directory(root)
+        .add_filter("Video or ScreenCraft project", &["mp4", "m4v", "mov", "json"])
+        .pick_file()?;
+    Some(project_dir_of(&f).unwrap_or(f))
 }
 
 pub fn reveal(path: &std::path::Path) {

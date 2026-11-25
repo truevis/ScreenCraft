@@ -146,6 +146,7 @@ pub enum MenuAction {
     SysOff,
     SysOn,
     OpenProject(PathBuf),
+    PickProject,
     RevealFolder,
     ChooseFolder,
 }
@@ -534,6 +535,7 @@ impl Recorder {
         if list.is_empty() {
             v.push(MenuItem::Item { label: "No projects yet".into(), sub: String::new(), checked: false, action: MenuAction::None });
         }
+        v.push(MenuItem::Item { label: "Open project…".into(), sub: "Edit an earlier recording".into(), checked: false, action: MenuAction::PickProject });
         v.push(MenuItem::Header("Raw recordings folder".into()));
         v.push(MenuItem::Item { label: "Open recordings folder".into(), sub: prefs.recordings_dir.display().to_string(), checked: false, action: MenuAction::RevealFolder });
         v.push(MenuItem::Item { label: "Choose recordings folder…".into(), sub: String::new(), checked: false, action: MenuAction::ChooseFolder });
@@ -566,6 +568,11 @@ impl Recorder {
             MenuAction::SysOff => prefs.system_audio = false,
             MenuAction::SysOn => prefs.system_audio = true,
             MenuAction::OpenProject(dir) => return Action::OpenProject(dir),
+            MenuAction::PickProject => {
+                if let Some(d) = crate::editor::pick_project(&prefs.recordings_dir) {
+                    return Action::OpenProject(d);
+                }
+            }
             MenuAction::RevealFolder => {
                 let _ = crate::editor::open_url(&prefs.recordings_dir.to_string_lossy());
             }

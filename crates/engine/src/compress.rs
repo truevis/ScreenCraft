@@ -21,7 +21,7 @@ pub struct CompressOptions {
 }
 
 /// Box-filter scale of an I420 picture.
-fn scale(f: &I420, w: u32, h: u32) -> I420 {
+pub(crate) fn scale(f: &I420, w: u32, h: u32) -> I420 {
     if (f.width, f.height) == (w, h) {
         return f.clone();
     }

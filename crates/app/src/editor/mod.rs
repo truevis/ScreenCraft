@@ -119,6 +119,17 @@ struct AnnotDrag {
 /// Preview frame rate of the render track (editing); exports use their own.
 const TRACK_FPS: f64 = 60.0;
 
+/// What the Projects menu asks the app to do with the recorder.
+#[derive(Clone, Debug)]
+pub enum FootageRequest {
+    /// Close this project and show the recorder bar for a new recording.
+    NewRecording,
+    /// Close this project, record, and add that recording to the end of this project.
+    RecordMore,
+    /// Add an existing recording (`.screencraft` folder) or MP4 to the end of this project.
+    Add(std::path::PathBuf),
+}
+
 pub struct EditorState {
     pub package: Package,
     pub project: Project,
@@ -182,6 +193,8 @@ pub struct EditorState {
     pub open_request: Option<std::path::PathBuf>,
     /// Raw video to open in the compressor window.
     pub compress_request: Option<std::path::PathBuf>,
+    /// Asked from the Projects menu: leave this editor to record, or add footage to this project.
+    pub footage_request: Option<FootageRequest>,
     /// Waveform peaks (0..1, 3000 bins) of music files, filled in by a worker.
     pub music_peaks: HashMap<String, Arc<Vec<f32>>>,
     peaks_pending: std::collections::HashSet<String>,
@@ -273,6 +286,7 @@ impl EditorState {
             wants_back: false,
             open_request: None,
             compress_request: None,
+            footage_request: None,
             music_peaks: HashMap::new(),
             peaks_pending: Default::default(),
             peaks_tx: ptx,
@@ -1196,7 +1210,7 @@ impl EditorState {
             let fg = if resp.hovered() { Color32::WHITE } else { Color32::from_rgb(0xcd, 0xd5, 0xe5) };
             icons::paint(ui, "folder", Rect::from_center_size(Pos2::new(rect.min.x + 10.0 + 8.0, rect.center().y), Vec2::splat(16.0)), fg);
             ui.painter().text(Pos2::new(rect.min.x + 10.0 + 16.0 + 8.0, rect.center().y), Align2::LEFT_CENTER, "Projects", kit::font(13.0), fg);
-            if resp.clone().on_hover_text("Open another project or show this one in Finder").clicked() {
+            if resp.clone().on_hover_text("New recording, open another project, or add footage to this one").clicked() {
                 self.dialogs.projects = !self.dialogs.projects;
                 self.dialogs.projects_anchor = Some(rect);
             }
@@ -1599,7 +1613,7 @@ fn paint_stage_bg(ui: &egui::Ui, rect: Rect) {
     p.with_clip_rect(rect).add(egui::Shape::mesh(mesh));
 }
 
-pub use dialogs::reveal;
+pub use dialogs::{pick_project, reveal};
 
 pub fn open_url(url: &str) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]

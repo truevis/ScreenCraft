@@ -5,6 +5,7 @@
 
 pub mod audio_mix;
 pub mod camera_rec;
+pub mod append;
 pub mod compress;
 pub mod export;
 pub mod gif;

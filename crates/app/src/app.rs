@@ -4,11 +4,12 @@
 use crate::editor::EditorState;
 use crate::prefs::Prefs;
 use crate::recorder::{Action, Evt, Mode, Phase, Recorder, BAR_H, BAR_W};
-use eframe::egui::{self, Pos2, Vec2, ViewportBuilder, ViewportCommand, ViewportId};
+use eframe::egui::{self, Color32, Pos2, Vec2, ViewportBuilder, ViewportCommand, ViewportId};
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use screencraft_core::project::Rect as PRect;
 use screencraft_engine::Package;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 struct EditorWin {
@@ -46,6 +47,38 @@ pub struct App {
     discard_after_stop: bool,
     /// Native window handle (Windows), to keep the recording bar out of the capture.
     native_window: Option<isize>,
+    /// "Record more for this project": the next recording is added to the end of this project.
+    append_target: Option<std::path::PathBuf>,
+    /// Footage being added to a project (runs on its own thread).
+    append_job: Option<AppendJob>,
+}
+
+/// Joining a recording or video onto the end of a project, off the UI thread.
+struct AppendJob {
+    target: std::path::PathBuf,
+    /// A recording made just for this (removed once it is in the project).
+    temp: Option<std::path::PathBuf>,
+    progress: Arc<std::sync::atomic::AtomicU32>,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    result: Arc<std::sync::Mutex<Option<Result<screencraft_engine::append::Appended, String>>>>,
+}
+
+impl AppendJob {
+    fn start(target: std::path::PathBuf, extra: std::path::PathBuf, temp: bool) -> Self {
+        use std::sync::atomic::Ordering;
+        let progress = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let result = Arc::new(std::sync::Mutex::new(None));
+        let (p, c, r, t, e) = (progress.clone(), cancel.clone(), result.clone(), target.clone(), extra.clone());
+        std::thread::spawn(move || {
+            let res = screencraft_engine::append::append(&t, &e, |f| {
+                p.store((f * 1000.0) as u32, Ordering::Relaxed);
+                !c.load(Ordering::Relaxed)
+            });
+            *r.lock().unwrap() = Some(res);
+        });
+        Self { target, temp: temp.then_some(extra), progress, cancel, result }
+    }
 }
 
 struct Shot {
@@ -169,6 +202,8 @@ impl App {
             hover_window: None,
             compressor: None,
             pending_open: Vec::new(),
+            append_target: None,
+            append_job: None,
             fresh: Vec::new(),
             quit: false,
             discard_after_stop: false,
@@ -268,6 +303,90 @@ impl App {
         ctx.request_repaint();
     }
 
+    /// The note above the bar while recording more for a project, and the progress window
+    /// while footage is being added.
+    fn draw_append(&mut self, ctx: &egui::Context) {
+        use std::sync::atomic::Ordering;
+        if let Some(target) = self.append_target.clone() {
+            let active = matches!(self.rec.phase, Phase::Idle | Phase::Starting | Phase::Countdown | Phase::Recording | Phase::Confirm);
+            if let (true, true, Some(o)) = (self.editors.is_empty(), active, ctx.input(|i| i.viewport().outer_rect)) {
+                let name = Package::open(&target).load_project().map(|p| p.name).unwrap_or_default();
+                let size = Vec2::new(o.width().max(380.0), 34.0);
+                let builder = ViewportBuilder::default()
+                    .with_title("sc-append-note")
+                    .with_position(Pos2::new(o.min.x, o.max.y - BAR_H - size.y - 8.0))
+                    .with_inner_size(size)
+                    .with_decorations(false)
+                    .with_resizable(false)
+                    .with_taskbar(false)
+                    .with_always_on_top();
+                let mut cancel = false;
+                ctx.show_viewport_immediate(ViewportId::from_hash_of("sc-append-note"), builder, |ui, _| {
+                    let r = ui.max_rect().expand(8.0);
+                    ui.painter().rect_filled(r, 0.0, Color32::from_rgb(0x12, 0x2a, 0x45));
+                    let inner = ui.max_rect();
+                    ui.painter().text(
+                        Pos2::new(inner.min.x + 6.0, inner.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        format!("Recording more for \u{201c}{name}\u{201d}: it goes at the end"),
+                        crate::kit::font(13.0),
+                        Color32::WHITE,
+                    );
+                    let b = egui::Rect::from_min_size(Pos2::new(inner.max.x - 72.0, inner.center().y - 12.0), Vec2::new(70.0, 24.0));
+                    if ui.put(b, egui::Button::new("Cancel")).clicked() {
+                        cancel = true;
+                    }
+                });
+                screencraft_capture::exclude_window_titled("sc-append-note");
+                if cancel {
+                    // back to the project; a recording already running is kept as its own project
+                    self.append_target = None;
+                    if self.rec.phase == Phase::Idle {
+                        self.pending_open.push(target);
+                    }
+                }
+            }
+        }
+        let Some(job) = &self.append_job else { return };
+        let done = job.result.lock().unwrap().take();
+        if let Some(res) = done {
+            let job = self.append_job.take().unwrap();
+            match res {
+                Ok(a) => {
+                    let _ = std::fs::remove_file(&a.old_screen);
+                    if let Some(t) = &job.temp {
+                        let _ = std::fs::remove_dir_all(t);
+                    }
+                    crate::applog::line(&format!("added {:.1} s to {}", a.added_ms / 1000.0, job.target.display()));
+                }
+                Err(e) => {
+                    crate::applog::line(&format!("adding footage failed: {e}"));
+                    if e != "cancelled" {
+                        let kept = job.temp.as_ref().map(|t| format!(" (the new recording is kept as {})", t.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())).unwrap_or_default();
+                        self.rec.show_error(format!("Couldn't add the footage: {e}{kept}"));
+                    }
+                }
+            }
+            self.pending_open.push(job.target);
+            return;
+        }
+        let f = job.progress.load(Ordering::Relaxed) as f32 / 1000.0;
+        let cancel = job.cancel.clone();
+        let builder = ViewportBuilder::default().with_title("Adding footage").with_inner_size([440.0, 150.0]).with_resizable(false);
+        ctx.show_viewport_immediate(ViewportId::from_hash_of("sc-append-job"), builder, |ui, _| {
+            egui::CentralPanel::default().frame(egui::Frame::new().fill(crate::theme::BG).inner_margin(egui::Margin::same(20))).show_inside(ui, |ui| {
+                ui.label(egui::RichText::new("Adding footage to the end of the project\u{2026}").size(14.0).color(Color32::WHITE));
+                ui.add_space(10.0);
+                ui.add(egui::ProgressBar::new(f).show_percentage());
+                ui.add_space(10.0);
+                if ui.button("Cancel").clicked() || ui.ctx().input(|i| i.viewport().close_requested()) {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            });
+        });
+        ctx.request_repaint_after(Duration::from_millis(100));
+    }
+
     fn finish_recording(&mut self, ctx: &egui::Context, discard: bool) {
         match self.rec.phase {
             Phase::Countdown => {
@@ -320,10 +439,13 @@ impl App {
                         Ok(f) if discard => {
                             let _ = std::fs::remove_dir_all(&f.package.dir);
                         }
-                        Ok(f) => {
-                            self.fresh.push(f.package.dir.clone());
-                            self.pending_open.push(f.package.dir.clone());
-                        }
+                        Ok(f) => match self.append_target.take() {
+                            Some(target) => self.append_job = Some(AppendJob::start(target, f.package.dir.clone(), true)),
+                            None => {
+                                self.fresh.push(f.package.dir.clone());
+                                self.pending_open.push(f.package.dir.clone());
+                            }
+                        },
                         Err(e) => self.rec.show_error(e),
                     }
                 }
@@ -618,6 +740,16 @@ impl App {
                     }
                 });
             }
+            if let Some(req) = self.editors[i].ed.footage_request.take() {
+                use crate::editor::FootageRequest;
+                let dir = self.editors[i].ed.package.dir.clone();
+                match req {
+                    FootageRequest::NewRecording => self.append_target = None,
+                    FootageRequest::RecordMore => self.append_target = Some(dir),
+                    FootageRequest::Add(p) => self.append_job = Some(AppendJob::start(dir, p, false)),
+                }
+                close = true;
+            }
             let title = format!("{}{}", self.editors[i].ed.project.name, if self.editors[i].ed.dirty { " *" } else { "" });
             if title != self.editors[i].title {
                 self.editors[i].title = title;
@@ -661,6 +793,7 @@ impl App {
                 self.compressor = Some(c);
             }
         }
+        self.draw_append(&ctx);
         open_requests.extend(std::mem::take(&mut self.pending_open));
         for dir in open_requests {
             // opening another project replaces the ones on screen, asking about unsaved edits first
