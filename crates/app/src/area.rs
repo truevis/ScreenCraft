@@ -134,9 +134,54 @@ impl Picker {
     }
 }
 
+/// The recording outline as small opaque windows (four edges and the REC tag) instead of one
+/// full-screen transparent window. On hybrid Intel + NVIDIA laptops the transparent window was
+/// drawn as a white or black block over the screen being recorded.
+fn draw_rec_frame(ctx: &egui::Context, rect: PRect) {
+    const T: f32 = 3.0;
+    let (x, y, w, h) = (rect.x as f32, rect.y as f32, rect.width as f32, rect.height as f32);
+    let edges = [
+        ("rec-top", Pos2::new(x, y), Vec2::new(w, T)),
+        ("rec-bottom", Pos2::new(x, y + h - T), Vec2::new(w, T)),
+        ("rec-left", Pos2::new(x, y + T), Vec2::new(T, (h - 2.0 * T).max(1.0))),
+        ("rec-right", Pos2::new(x + w - T, y + T), Vec2::new(T, (h - 2.0 * T).max(1.0))),
+    ];
+    let bar = |title: &str, pos: Pos2, size: Vec2| {
+        ViewportBuilder::default()
+            .with_title(title)
+            .with_position(pos)
+            .with_inner_size(size)
+            .with_min_inner_size(size)
+            .with_decorations(false)
+            .with_resizable(false)
+            .with_has_shadow(false)
+            .with_taskbar(false)
+            .with_mouse_passthrough(true)
+            .with_always_on_top()
+    };
+    for (id, pos, size) in edges {
+        ctx.show_viewport_immediate(ViewportId::from_hash_of(id), bar(id, pos, size), |ui, _| {
+            ui.painter().rect_filled(ui.max_rect().expand(2.0), 0.0, DANGER);
+        });
+    }
+    // The tag sits just above the top-left corner, or just inside it at the top of a display.
+    let tag_size = Vec2::new(52.0, 22.0);
+    let tag_y = if y >= tag_size.y + 6.0 { y - tag_size.y - 6.0 } else { y + T + 4.0 };
+    ctx.show_viewport_immediate(ViewportId::from_hash_of("rec-tag"), bar("rec-tag", Pos2::new(x + T + 4.0, tag_y), tag_size), |ui, _| {
+        let r = ui.max_rect();
+        let p = ui.painter();
+        p.rect_filled(r.expand(2.0), 0.0, DANGER);
+        p.circle_filled(Pos2::new(r.min.x + 12.0, r.center().y), 3.5, Color32::WHITE);
+        p.text(Pos2::new(r.min.x + 22.0, r.center().y), Align2::LEFT_CENTER, "REC", kit::font(11.0), Color32::WHITE);
+    });
+}
+
 /// The click-through outline around `rect` (global logical points): `sel` the chosen area, `hl` a
 /// window being hovered in the menu, `rec` while recording.
 pub fn draw_frame(ctx: &egui::Context, rect: PRect, style: &'static str, displays: &[DisplayInfo]) {
+    if style == "rec" {
+        return draw_rec_frame(ctx, rect);
+    }
     let d = displays
         .iter()
         .find(|d| rect.x + rect.width / 2.0 >= d.x && rect.x + rect.width / 2.0 < d.x + d.width && rect.y + rect.height / 2.0 >= d.y && rect.y + rect.height / 2.0 < d.y + d.height)

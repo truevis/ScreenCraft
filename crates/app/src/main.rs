@@ -29,9 +29,8 @@ fn main() -> eframe::Result {
             .with_always_on_top()
             .with_icon(icon()),
         renderer: eframe::Renderer::Wgpu,
-        // Keep eframe's default wgpu setup: the transparent overlay windows (recording border,
-        // area picker) need a backend with alpha compositing. Forcing DirectX 12 made them
-        // opaque black, covering the screen and recording black frames.
+        // Keep eframe's default wgpu setup. Forcing DirectX 12 turned transparent windows opaque
+        // black, and the low-power (Intel) adapter stopped them presenting at all.
         ..Default::default()
     };
     eframe::run_native("ScreenCraft", options, Box::new(|cc| Ok(Box::new(screencraft::app::App::new(cc)))))
