@@ -164,6 +164,10 @@ fn draw_rec_frame(ctx: &egui::Context, rect: PRect) {
             ui.painter().rect_filled(ui.max_rect().expand(2.0), 0.0, DANGER);
         });
     }
+    // Keep the border and tag out of the recording (desktop duplication sees every window).
+    for id in ["rec-top", "rec-bottom", "rec-left", "rec-right", "rec-tag"] {
+        screencraft_capture::exclude_window_titled(id);
+    }
     // The tag sits just above the top-left corner, or just inside it at the top of a display.
     let tag_size = Vec2::new(52.0, 22.0);
     let tag_y = if y >= tag_size.y + 6.0 { y - tag_size.y - 6.0 } else { y + T + 4.0 };

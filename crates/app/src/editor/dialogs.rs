@@ -432,7 +432,16 @@ pub fn reveal(path: &std::path::Path) {
     #[cfg(target_os = "macos")]
     let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
     #[cfg(target_os = "windows")]
-    let _ = std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn();
+    {
+        // Explorer parses its own command line: `.arg()` would quote the whole `/select,...`
+        // token when the path has spaces, which Explorer rejects and opens Documents instead.
+        // Pass `/select,"C:\full\path"` verbatim, with backslashes and an absolute path.
+        use std::os::windows::process::CommandExt;
+        let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let s = abs.display().to_string();
+        let s = s.strip_prefix(r"\\?\").unwrap_or(&s).replace('/', "\\");
+        let _ = std::process::Command::new("explorer").raw_arg(format!("/select,\"{s}\"")).spawn();
+    }
     #[cfg(all(unix, not(target_os = "macos")))]
     let _ = std::process::Command::new("xdg-open").arg(path.parent().unwrap_or(path)).spawn();
 }

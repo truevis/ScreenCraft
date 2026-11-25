@@ -172,6 +172,23 @@ pub fn set_excluded_from_capture(hwnd: isize, excluded: bool) -> bool {
     }
 }
 
+/// Keep one of our extra top-level windows (found by its title) out of the capture.
+#[cfg(windows)]
+pub fn exclude_window_titled(title: &str) -> bool {
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
+    let wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+    match unsafe { FindWindowW(PCWSTR::null(), PCWSTR(wide.as_ptr())) } {
+        Ok(h) if !h.0.is_null() => set_excluded_from_capture(h.0 as isize, true),
+        _ => false,
+    }
+}
+
+#[cfg(not(windows))]
+pub fn exclude_window_titled(_title: &str) -> bool {
+    false
+}
+
 #[cfg(not(windows))]
 pub fn set_excluded_from_capture(_hwnd: isize, _excluded: bool) -> bool {
     false
