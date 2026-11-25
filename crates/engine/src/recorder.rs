@@ -276,7 +276,19 @@ impl Recording {
             let (cw, ch) = (info.width, info.height);
             std::thread::Builder::new()
                 .name("screencraft-record".into())
-                .spawn(move || worker_loop(cap_rx, audio_rx, ctl_rx, exporter, tracks, fps, (cw, ch), stats, first))
+                .spawn(move || {
+                    let r = worker_loop(cap_rx, audio_rx, ctl_rx, &exporter, tracks, fps, (cw, ch), stats, first);
+                    // Always finish the file: on success that writes the index; after a failure it
+                    // either saves what was recorded or reports the encoder's real error.
+                    let fin = exporter.finish();
+                    match (r, fin) {
+                        (Ok(w), Ok(_)) => Ok(w),
+                        (Ok(_), Err(e)) => Err(format!("saving the recording failed: {e}")),
+                        (Err(e), Ok(_)) => Err(e),
+                        (Err(e), Err(fe)) if e.contains("encoder thread stopped") => Err(format!("the video encoder failed: {fe}")),
+                        (Err(e), Err(_)) => Err(e),
+                    }
+                })
                 .map_err(|e| e.to_string())?
         };
 
@@ -359,7 +371,8 @@ impl Recording {
             a.stop();
         }
         let end_ns = self.clock.now_ns();
-        self.ctl.send(Ctl::Stop { end_ns }).map_err(|_| "recorder stopped unexpectedly".to_string())?;
+        // If the worker already quit, its own error (returned by join) says why.
+        let _ = self.ctl.send(Ctl::Stop { end_ns });
         let result = self
             .worker
             .take()
@@ -429,7 +442,7 @@ fn worker_loop(
     cap_rx: Receiver<Event>,
     audio_rx: Receiver<AudioBlock>,
     ctl_rx: Receiver<Ctl>,
-    exporter: ThreadedExporter,
+    exporter: &ThreadedExporter,
     tracks: Tracks,
     fps: u32,
     size: (u32, u32),
@@ -564,6 +577,5 @@ fn worker_loop(
         }
     }
     let duration_ms = cfr.slots() as f64 * 1000.0 / fps as f64;
-    exporter.finish().map_err(|e| e.to_string())?;
     Ok(WorkerResult { frames: frames_sent, duration_ms, origin_ns })
 }

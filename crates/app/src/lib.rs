@@ -1,6 +1,7 @@
 //! ScreenCraft application: egui / wgpu UI over the capture, render and encode engines.
 
 pub mod app;
+pub mod applog;
 pub mod area;
 pub mod compressor;
 pub mod editor;

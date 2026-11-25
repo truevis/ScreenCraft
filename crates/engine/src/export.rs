@@ -101,14 +101,14 @@ fn analyse_mic(file: &Arc<Mp4File>, track: usize, key: (std::path::PathBuf, u32,
         return None;
     }
     let mut sorted = rms.clone();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let top = &sorted[(sorted.len() as f32 * 0.8) as usize..];
     let speech_level = top.iter().sum::<f32>() / top.len().max(1) as f32;
     let gain = if peak < 1e-5 { 1.0 } else { (0.1 / speech_level.max(1e-5)).min(0.9 / peak).clamp(1.0, 60.0) };
     // speech segments against the room's own noise floor (20th percentile)
     let lv: Vec<f32> = lvl0.iter().map(|v| v * gain).collect();
     let mut s2 = lv.clone();
-    s2.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    s2.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let floor = s2[s2.len() / 5];
     let thr = (floor * 3.0).max(0.02);
     let (hold, bridge) = (6usize, 7usize);
@@ -213,7 +213,7 @@ fn speech_output_ranges(speech: &[[f64; 2]], offset_ms: f64, slices: &[screencra
         }
         acc += len;
     }
-    out.sort_by(|a, b| a[0].partial_cmp(&b[0]).unwrap());
+    out.sort_by(|a, b| a[0].partial_cmp(&b[0]).unwrap_or(std::cmp::Ordering::Equal));
     let mut merged: Vec<[f64; 2]> = Vec::new();
     for r in out {
         match merged.last_mut() {

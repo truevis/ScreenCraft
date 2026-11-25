@@ -30,7 +30,7 @@ pub fn find_silences(levels_db: &[f32], frame_ms: f64, s: &JumpCutSettings) -> V
         return Vec::new();
     }
     let mut sorted: Vec<f32> = levels_db.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let floor = sorted[n / 10];
     let speech = sorted[(n * 9 / 10).min(n - 1)];
     if speech - floor < 8.0 {
@@ -94,7 +94,7 @@ pub fn apply_jump_cuts(slices: &mut Vec<Slice>, ranges: &[[f64; 2]], mut new_id:
             .map(|r| [r[0].max(s.source_start_ms), r[1].min(s.source_end_ms)])
             .filter(|r| r[1] - r[0] >= 40.0)
             .collect();
-        hits.sort_by(|a, b| a[0].partial_cmp(&b[0]).unwrap());
+        hits.sort_by(|a, b| a[0].partial_cmp(&b[0]).unwrap_or(std::cmp::Ordering::Equal));
         if hits.is_empty() {
             out.push(s);
             continue;

@@ -174,7 +174,7 @@ fn refine(words: Vec<(String, f64, f64)>, pcm16k: &[f32]) -> Vec<(String, f64, f
     }
     let e: Vec<f32> = (0..n).map(|i| (pcm16k[i * FRAME..(i + 1) * FRAME].iter().map(|x| x * x).sum::<f32>() / FRAME as f32).sqrt()).collect();
     let mut sorted = e.clone();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let noise = sorted[n / 5].max(1e-5);
     let at = |ms: f64| ((ms / 10.0).round().max(0.0) as usize).min(n - 1);
     words

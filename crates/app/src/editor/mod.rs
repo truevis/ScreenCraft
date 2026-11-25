@@ -982,7 +982,7 @@ impl EditorState {
             let prev = pressed(egui::Key::A);
             let mut starts: Vec<f64> =
                 self.project.scene.zooms.iter().filter_map(|z| ops::src_to_out(&self.project.scene.slices, z.source_start_ms)).collect();
-            starts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            starts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             let eps = 30.0;
             let target = if prev { starts.iter().rev().find(|t| **t < self.playhead_ms - eps) } else { starts.iter().find(|t| **t > self.playhead_ms + eps) };
             if let Some(t) = target.copied() {

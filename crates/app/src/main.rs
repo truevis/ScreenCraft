@@ -13,6 +13,7 @@ fn icon() -> eframe::egui::IconData {
 }
 
 fn main() -> eframe::Result {
+    screencraft::applog::install_panic_hook();
     let options = eframe::NativeOptions {
         // The recorder bar: borderless, transparent, always on top, bottom-centre of the display.
         viewport: eframe::egui::ViewportBuilder::default()

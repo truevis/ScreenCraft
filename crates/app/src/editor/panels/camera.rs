@@ -50,7 +50,7 @@ fn bubble_controls(st: &mut EditorState, ui: &mut Ui, c: &CameraConfig, target: 
     let mut ar = c.aspect_ratio;
     let shapes: [(f64, &str); 4] = [(1.0, "Square"), (4.0 / 3.0, "4:3"), (16.0 / 9.0, "16:9"), (3.0 / 4.0, "3:4")];
     // pick the nearest so a float round trip never loses the highlight
-    let cur = shapes.iter().map(|s| s.0).min_by(|a, b| (a - ar).abs().partial_cmp(&(b - ar).abs()).unwrap()).unwrap();
+    let cur = shapes.iter().map(|s| s.0).min_by(|a, b| (a - ar).abs().partial_cmp(&(b - ar).abs()).unwrap_or(std::cmp::Ordering::Equal)).unwrap();
     let mut cur_i = shapes.iter().position(|s| s.0 == cur).unwrap();
     let opts: Vec<(usize, &str)> = shapes.iter().enumerate().map(|(i, s)| (i, s.1)).collect();
     if kit::segmented(ui, Some("Shape"), &opts, &mut cur_i) {

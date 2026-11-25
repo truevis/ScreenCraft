@@ -102,7 +102,7 @@ impl EditorState {
         let peaks = super::waveform_peaks(&path, track as usize).ok()?;
         // 20 ms packets; judge against the room's noise floor (20th percentile)
         let mut sorted = peaks.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let floor = sorted.get(sorted.len() / 5).copied().unwrap_or(0.0);
         let thr = (floor * 3.0).max(0.04);
         let n = (peaks.len() / 5) + 1;
@@ -199,7 +199,7 @@ impl EditorState {
             self.error = Some("There are no captions to export.".into());
             return;
         }
-        items.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap());
+        items.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal));
         let base = self.project.name.replace(['/', '\\', ':'], "-");
         let Some(path) = rfd::FileDialog::new().set_file_name(format!("{base}.srt")).add_filter("SRT", &["srt"]).save_file() else { return };
         if let Err(e) = std::fs::write(path, srt::write(&items)) {

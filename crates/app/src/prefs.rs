@@ -72,7 +72,12 @@ impl Prefs {
                 let _ = std::fs::create_dir_all(dir);
             }
             if let Ok(json) = serde_json::to_vec_pretty(self) {
-                let _ = std::fs::write(p, json);
+                // write then rename, so a crash or a locked file never leaves settings.json empty
+                let tmp = p.with_extension("json.tmp");
+                let r = std::fs::write(&tmp, json).and_then(|_| std::fs::rename(&tmp, &p));
+                if let Err(e) = r {
+                    crate::applog::line(&format!("could not save settings: {e}"));
+                }
             }
         }
     }

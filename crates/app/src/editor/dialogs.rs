@@ -82,7 +82,10 @@ fn save_user_presets(all: &[(String, Value)]) {
             let _ = std::fs::create_dir_all(d);
         }
         let m: serde_json::Map<String, Value> = all.iter().cloned().collect();
-        let _ = std::fs::write(p, serde_json::to_vec_pretty(&m).unwrap_or_default());
+        let tmp = p.with_extension("json.tmp");
+        if let Err(e) = std::fs::write(&tmp, serde_json::to_vec_pretty(&m).unwrap_or_default()).and_then(|_| std::fs::rename(&tmp, &p)) {
+            crate::applog::line(&format!("could not save presets: {e}"));
+        }
     }
 }
 

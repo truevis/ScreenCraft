@@ -101,7 +101,7 @@ pub fn show(st: &mut EditorState, ui: &mut Ui) {
         st.edit(|p| preset("tiktok", &mut p.config.subtitles));
     }
     let mut list = st.project.scene.subtitles.clone();
-    list.sort_by(|a, b| a.source_start_ms.partial_cmp(&b.source_start_ms).unwrap());
+    list.sort_by(|a, b| a.source_start_ms.partial_cmp(&b.source_start_ms).unwrap_or(std::cmp::Ordering::Equal));
     kit::h3(ui, "Captions", true);
     note(ui, "Type captions or import an SRT file. They sit in the middle of the bottom third of the video, like TikTok.");
     // on-device speech recognition (whisper.cpp); runs locally, nothing is uploaded

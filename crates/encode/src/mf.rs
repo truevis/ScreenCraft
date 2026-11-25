@@ -1,8 +1,6 @@
 //! H.264 on Windows through Media Foundation (the operating system's licensed encoder and
 //! decoder). Synchronous transforms: NV12 in / Annex-B out for encoding, the reverse for decoding.
 //!
-//! NOTE: written against the `windows` crate API without a Windows machine at hand; it is
-//! type-checked and exercised by the Windows CI / first run, not by the macOS test suite.
 
 #![allow(non_snake_case)]
 
@@ -12,21 +10,28 @@ use crate::types::*;
 use crate::{Error, Result};
 use std::collections::VecDeque;
 use std::mem::ManuallyDrop;
-use std::sync::Once;
+use std::sync::OnceLock;
 use windows::core::Interface;
 use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED};
 
+/// COM is per thread: the encoder is built on the recorder's thread and then driven from the
+/// encode thread, so every thread that touches a transform joins the multithreaded apartment.
+/// Media Foundation itself is started once for the process and never shut down.
 fn init() -> Result<()> {
-    static ONCE: Once = Once::new();
-    let mut r = Ok(());
-    ONCE.call_once(|| unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        if let Err(e) = MFStartup(MF_VERSION, MFSTARTUP_FULL) {
-            r = Err(Error::Codec(format!("Media Foundation failed to start: {e}")));
-        }
-    });
-    r
+    thread_local! {
+        static COM: () = unsafe {
+            // RPC_E_CHANGED_MODE (an STA thread) is fine: the MFTs used here are free-threaded.
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        };
+    }
+    COM.with(|_| ());
+    static STARTED: OnceLock<Option<String>> = OnceLock::new();
+    let failed = STARTED.get_or_init(|| unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL).err().map(|e| format!("Media Foundation failed to start: {e}")) });
+    match failed {
+        Some(m) => Err(Error::Codec(m.clone())),
+        None => Ok(()),
+    }
 }
 
 fn err(what: &str, e: windows::core::Error) -> Error {
@@ -105,6 +110,11 @@ unsafe fn drain(mft: &IMFTransform, provides_samples: bool, out_size: u32) -> wi
     Ok(out)
 }
 
+/// A compressed frame never needs more room than the raw NV12 picture (plus slack).
+fn frame_bytes(cfg: &VideoConfig) -> u32 {
+    (cfg.width * cfg.height * 3 / 2).max(1 << 20)
+}
+
 pub struct MfH264Encoder {
     mft: IMFTransform,
     cfg: VideoConfig,
@@ -133,6 +143,8 @@ impl MfH264Encoder {
             let out_t = video_type(&MFVideoFormat_H264, cfg.width, cfg.height, fps).map_err(|e| err("encoder type", e))?;
             out_t.SetUINT32(&MF_MT_AVG_BITRATE, cfg.bitrate_kbps.saturating_mul(1000)).map_err(|e| err("bitrate", e))?;
             out_t.SetUINT32(&MF_MT_MPEG2_PROFILE, 100).map_err(|e| err("profile", e))?;
+            // Short GOPs keep seeking in the editor fast; the encoder treats this as a ceiling.
+            let _ = out_t.SetUINT32(&MF_MT_MAX_KEYFRAME_SPACING, cfg.effective_keyint().max(1));
             mft.SetOutputType(0, &out_t, 0).map_err(|e| err("encoder output type", e))?;
             let in_t = video_type(&MFVideoFormat_NV12, cfg.width, cfg.height, fps).map_err(|e| err("encoder input type", e))?;
             mft.SetInputType(0, &in_t, 0).map_err(|e| err("encoder input type", e))?;
@@ -140,7 +152,7 @@ impl MfH264Encoder {
             mft.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0).map_err(|e| err("start", e))?;
             let info = mft.GetOutputStreamInfo(0).map_err(|e| err("stream info", e))?;
             let provides = info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 != 0;
-            Ok(Self { mft, cfg: cfg.clone(), avcc: Vec::new(), provides, out_size: info.cbSize.max(1 << 20), pending_pts: VecDeque::new() })
+            Ok(Self { mft, cfg: cfg.clone(), avcc: Vec::new(), provides, out_size: info.cbSize.max(frame_bytes(cfg)), pending_pts: VecDeque::new() })
         }
     }
 
@@ -150,7 +162,7 @@ impl MfH264Encoder {
         self.mft.SetOutputType(0, &t, 0).map_err(|e| err("encoder output type", e))?;
         let info = self.mft.GetOutputStreamInfo(0).map_err(|e| err("stream info", e))?;
         self.provides = info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 != 0;
-        self.out_size = info.cbSize.max(1 << 20);
+        self.out_size = info.cbSize.max(frame_bytes(&self.cfg));
         Ok(())
     }
 
@@ -193,6 +205,7 @@ impl VideoEncoder for MfH264Encoder {
     }
 
     fn encode(&mut self, f: &I420, pts_us: i64) -> Result<Vec<Packet>> {
+        init()?;
         if f.width != self.cfg.width || f.height != self.cfg.height {
             return Err(Error::Config("frame size changed mid-stream".into()));
         }
@@ -208,13 +221,30 @@ impl VideoEncoder for MfH264Encoder {
         self.pending_pts.push_back(pts_us);
         let samples = unsafe {
             let s = sample_from(&nv, pts_us * 10, dur).map_err(|e| err("input sample", e))?;
-            self.mft.ProcessInput(0, &s, 0).map_err(|e| err("encode", e))?;
-            self.drain_encoder()?
+            let mut early = Vec::new();
+            // A transform that still holds output refuses input until it is drained.
+            let mut tries = 0;
+            loop {
+                match self.mft.ProcessInput(0, &s, 0) {
+                    Ok(()) => break,
+                    Err(e) if e.code() == MF_E_NOTACCEPTING && tries < 8 => {
+                        tries += 1;
+                        early.extend(self.drain_encoder()?);
+                    }
+                    Err(e) => {
+                        self.pending_pts.pop_back();
+                        return Err(err("encode", e));
+                    }
+                }
+            }
+            early.extend(self.drain_encoder()?);
+            early
         };
         self.collect(samples)
     }
 
     fn flush(&mut self) -> Result<Vec<Packet>> {
+        init()?;
         let samples = unsafe {
             self.mft.ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0).map_err(|e| err("flush", e))?;
             self.mft.ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0).map_err(|e| err("flush", e))?;

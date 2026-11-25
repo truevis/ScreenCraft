@@ -195,6 +195,22 @@ impl Exporter {
         }
     }
 
+    /// After a failure, close the container with the packets already written so the file
+    /// still plays up to that point. Does nothing when no packet was ever muxed.
+    pub fn salvage(&mut self) -> Result<()> {
+        if self.finished || self.mux.is_none() {
+            return Ok(());
+        }
+        self.pump(true)?;
+        let duration = self.last_video_pts + self.settings.video.frame_duration_us();
+        let ops = self.mux.as_mut().unwrap().finish(duration)?;
+        for op in ops {
+            self.emit(op);
+        }
+        self.finished = true;
+        Ok(())
+    }
+
     fn accept_video(&mut self, pkts: Vec<Packet>) -> Result<()> {
         if self.mux.is_none() && !pkts.is_empty() {
             self.open_mux()?;
@@ -306,19 +322,29 @@ impl ThreadedExporter {
                     }
                     Ok(())
                 };
-                while let Ok(m) = rx.recv() {
-                    match m {
-                        Msg::Video(f, pts) => ex.push_video(&f, pts)?,
-                        Msg::Audio(t, p) => ex.push_audio(t, &p)?,
-                        Msg::Finish => {
-                            let s = ex.finish()?;
-                            drain(&mut ex)?;
-                            return Ok(s);
+                let mut run = |ex: &mut Exporter| -> Result<ExportSummary> {
+                    while let Ok(m) = rx.recv() {
+                        match m {
+                            Msg::Video(f, pts) => ex.push_video(&f, pts)?,
+                            Msg::Audio(t, p) => ex.push_audio(t, &p)?,
+                            Msg::Finish => {
+                                let s = ex.finish()?;
+                                drain(ex)?;
+                                return Ok(s);
+                            }
                         }
+                        drain(ex)?;
                     }
-                    drain(&mut ex)?;
+                    Err(Error::State("export abandoned before finish".into()))
+                };
+                let r = run(&mut ex);
+                if r.is_err() {
+                    // keep what was recorded playable
+                    if ex.salvage().is_ok() {
+                        let _ = drain(&mut ex);
+                    }
                 }
-                Err(Error::State("export abandoned before finish".into()))
+                r
             })?;
         Ok(Self { tx: Some(tx), join: Some(join) })
     }

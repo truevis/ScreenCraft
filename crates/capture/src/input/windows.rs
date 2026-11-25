@@ -105,23 +105,57 @@ fn key_code(vk: u32) -> Option<&'static str> {
     })
 }
 
+/// True when keyboard focus is in a Win32 password box. Keys typed there are never logged,
+/// so a password can't end up in input.json or in the shortcut overlay.
+fn in_password_field() -> bool {
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg == HWND::default() {
+            return false;
+        }
+        let tid = GetWindowThreadProcessId(fg, None);
+        let mut gui = GUITHREADINFO { cbSize: std::mem::size_of::<GUITHREADINFO>() as u32, ..Default::default() };
+        if GetGUIThreadInfo(tid, &mut gui).is_err() || gui.hwndFocus == HWND::default() {
+            return false;
+        }
+        let mut class = [0u16; 32];
+        let n = GetClassNameW(gui.hwndFocus, &mut class) as usize;
+        let name = String::from_utf16_lossy(&class[..n]);
+        // ES_PASSWORD = 0x20; only meaningful on edit controls
+        name.eq_ignore_ascii_case("Edit") && (GetWindowLongW(gui.hwndFocus, GWL_STYLE) & 0x20) != 0
+    }
+}
+
 unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    // Never block or panic here: Windows drops low-level hooks that stall, and a panic across
+    // this extern boundary aborts the process. try_lock skips one event instead.
     if code == HC_ACTION as i32 {
         let info = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
         let msg = wparam.0 as u32;
-        let mut held = HELD.lock().unwrap();
-        let held = held.get_or_insert_with(Default::default);
-        if msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN {
-            // held keys auto-repeat; only the first press counts
-            if held.insert(info.vkCode) {
-                if let (Some(k), Some(b)) = (key_code(info.vkCode), HOOK_TARGET.lock().unwrap().as_ref()) {
+        if let Ok(mut held) = HELD.try_lock() {
+            let held = held.get_or_insert_with(Default::default);
+            if msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN {
+                // held keys auto-repeat; only the first press counts
+                if held.insert(info.vkCode) {
                     let mods = held_mods();
-                    let label = key_label(info.vkCode, mods);
-                    b.lock().unwrap().keys.push((Instant::now(), k, mods, label));
+                    // plain typing in a password box is dropped; shortcuts (ctrl/alt/win) are kept
+                    let secret = mods & (1 | 4 | 8) == 0 && in_password_field();
+                    if !secret {
+                        if let Some(k) = key_code(info.vkCode) {
+                            if let Ok(target) = HOOK_TARGET.try_lock() {
+                                if let Some(b) = target.as_ref() {
+                                    let label = key_label(info.vkCode, mods);
+                                    if let Ok(mut b) = b.try_lock() {
+                                        b.keys.push((Instant::now(), k, mods, label));
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
+            } else if msg == WM_KEYUP || msg == WM_SYSKEYUP {
+                held.remove(&info.vkCode);
             }
-        } else if msg == WM_KEYUP || msg == WM_SYSKEYUP {
-            held.remove(&info.vkCode);
         }
     }
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
@@ -208,7 +242,7 @@ fn poll_loop(stop: Arc<AtomicBool>, buffers: Arc<Mutex<Buffers>>, display: Displ
             let (x, y) = display.to_logical(p.x as f64, p.y as f64);
             let down = |vk: VIRTUAL_KEY| unsafe { GetAsyncKeyState(vk.0 as i32) } as u16 & 0x8000 != 0;
             let (l, r) = (down(VK_LBUTTON), down(VK_RBUTTON));
-            let mut b = buffers.lock().unwrap();
+            let mut b = buffers.lock().unwrap_or_else(|e| e.into_inner());
             let kind_changed = b.moves.last().map(|m| m.3 != kind).unwrap_or(true);
             if (p.x, p.y) != last_pos || kind_changed {
                 b.moves.push((now, x, y, kind));
@@ -225,11 +259,11 @@ fn poll_loop(stop: Arc<AtomicBool>, buffers: Arc<Mutex<Buffers>>, display: Displ
         }
         // while typing, follow the text caret (~16 Hz)
         if tick % 7 == 0 {
-            let typing = buffers.lock().unwrap().keys.last().map(|k| now.duration_since(k.0) < Duration::from_secs(2)).unwrap_or(false);
+            let typing = buffers.lock().unwrap_or_else(|e| e.into_inner()).keys.last().map(|k| now.duration_since(k.0) < Duration::from_secs(2)).unwrap_or(false);
             if typing {
                 if let Some((x, y, w, h)) = caret() {
                     let (lx, ly) = display.to_logical(x, y);
-                    buffers.lock().unwrap().carets.push((now, lx, ly, w / display.scale, h / display.scale));
+                    buffers.lock().unwrap_or_else(|e| e.into_inner()).carets.push((now, lx, ly, w / display.scale, h / display.scale));
                 }
             }
         }
@@ -243,7 +277,7 @@ impl InputTracker {
     pub fn start(display: Display) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let buffers = Arc::new(Mutex::new(Buffers::default()));
-        *HOOK_TARGET.lock().unwrap() = Some(buffers.clone());
+        *HOOK_TARGET.lock().unwrap_or_else(|e| e.into_inner()) = Some(buffers.clone());
         let (s, b) = (stop.clone(), buffers.clone());
         let poll = thread::Builder::new().name("screencraft-input".into()).spawn(move || poll_loop(s, b, display)).ok();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -267,8 +301,8 @@ impl InputTracker {
         if let Some(t) = self.poll.take() {
             let _ = t.join();
         }
-        *HOOK_TARGET.lock().unwrap() = None;
-        let buf = std::mem::take(&mut *self.buffers.lock().unwrap());
+        *HOOK_TARGET.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        let buf = std::mem::take(&mut *self.buffers.lock().unwrap_or_else(|e| e.into_inner()));
         let rel = |at: Instant| at.saturating_duration_since(zero).as_secs_f64() * 1000.0;
         InputLog {
             bounds,

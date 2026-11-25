@@ -64,7 +64,7 @@ pub fn generate(log: &InputLog, duration_ms: f64, opts: &AutoZoomOptions) -> Vec
 
     // typing bursts: [first key - lead, last key + tail]
     let mut keys: Vec<f64> = log.keys.iter().filter(|k| k.down).map(|k| k.t).collect();
-    keys.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    keys.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let mut i = 0;
     while i < keys.len() {
         let first = keys[i];
@@ -79,7 +79,7 @@ pub fn generate(log: &InputLog, duration_ms: f64, opts: &AutoZoomOptions) -> Vec
     }
 
     // union overlapping / nearly touching spans
-    spans.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    spans.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
     let mut merged: Vec<(f64, f64)> = Vec::new();
     for (s, e) in spans {
         match merged.last_mut() {

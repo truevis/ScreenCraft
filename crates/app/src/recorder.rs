@@ -80,16 +80,23 @@ impl Controller {
                         Cmd::Start(opts) => match Recording::start(opts) {
                             Ok(rec) => {
                                 let info = rec.info().clone();
+                                crate::applog::line(&format!("recording started {}x{} with {}", info.width, info.height, rec.encoder()));
                                 let _ = evt_tx.send(Evt::Started { stats: rec.stats.clone(), width: info.width, height: info.height, encoder: rec.encoder().to_string() });
                                 current = Some(rec);
                             }
                             Err(e) => {
+                                crate::applog::line(&format!("recording failed to start: {e}"));
                                 let _ = evt_tx.send(Evt::StartFailed(e));
                             }
                         },
                         Cmd::Stop => {
                             if let Some(rec) = current.take() {
-                                let _ = evt_tx.send(Evt::Stopped(rec.stop()));
+                                let r = rec.stop();
+                                match &r {
+                                    Ok(f) => crate::applog::line(&format!("recording saved: {} frames, {:.1} s, {}", f.frames, f.duration_ms / 1000.0, f.package.dir.display())),
+                                    Err(e) => crate::applog::line(&format!("recording failed on stop: {e}")),
+                                }
+                                let _ = evt_tx.send(Evt::Stopped(r));
                             }
                         }
                     }

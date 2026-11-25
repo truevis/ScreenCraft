@@ -337,7 +337,7 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
             }
         }
     }
-    items.sort_by(|x, y| x.1[0].partial_cmp(&y.1[0]).unwrap());
+    items.sort_by(|x, y| x.1[0].partial_cmp(&y.1[0]).unwrap_or(std::cmp::Ordering::Equal));
     let mut lanes: Vec<f64> = Vec::new();
     for (i, sp) in items {
         let lane = lanes.iter().position(|end| *end <= sp[0] + 1.0).unwrap_or_else(|| {
@@ -651,7 +651,7 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
                     Kind::Caption => {
                         st.tab = Tab::Captions;
                         let mut list = st.project.scene.subtitles.clone();
-                        list.sort_by(|a, b| a.source_start_ms.partial_cmp(&b.source_start_ms).unwrap());
+                        list.sort_by(|a, b| a.source_start_ms.partial_cmp(&b.source_start_ms).unwrap_or(std::cmp::Ordering::Equal));
                         if shift || cmd {
                             let mut ids = st.selected_caption_ids();
                             if shift && !ids.is_empty() {
