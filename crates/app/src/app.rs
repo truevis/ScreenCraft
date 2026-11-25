@@ -374,7 +374,7 @@ impl App {
 
     /// Where the idle bar of size `want` goes: back where the user last left it when that spot is
     /// still on a connected display (monitors come and go), otherwise centred on the main display.
-    fn home_pos(&self, want: Vec2) -> Pos2 {
+    fn home_pos(&self, ctx: &egui::Context, want: Vec2) -> Pos2 {
         let displays = self.rec.displays();
         let rect = |d: &screencraft_capture::DisplayInfo| egui::Rect::from_min_size(Pos2::new(d.x as f32, d.y as f32), Vec2::new(d.width as f32, d.height as f32));
         if let Some([ax, ay]) = self.prefs.bar_anchor {
@@ -385,13 +385,20 @@ impl App {
                 return Pos2::new(x, y);
             }
         }
-        let r = displays.iter().find(|d| d.is_main).map(rect).unwrap_or(egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0)));
+        // The display list arrives a moment after start; until then use the monitor the window
+        // opened on (the primary one, whose top-left is the desktop origin).
+        let monitor = ctx.input(|i| i.viewport().monitor_size).filter(|m| m.x > 0.0 && m.y > 0.0);
+        let r = displays
+            .iter()
+            .find(|d| d.is_main)
+            .map(rect)
+            .unwrap_or_else(|| egui::Rect::from_min_size(Pos2::ZERO, monitor.unwrap_or(Vec2::new(1440.0, 900.0))));
         Pos2::new(r.center().x - want.x / 2.0, r.center().y - want.y / 2.0)
     }
 
     /// Remember where the user dragged the idle bar, so the next start puts it back there.
     fn remember_bar(&mut self, ctx: &egui::Context) {
-        if self.rec.phase != Phase::Idle || !self.editors.is_empty() || self.rec.menu.is_some() {
+        if self.rec.phase != Phase::Idle || !self.editors.is_empty() || self.rec.menu.is_some() || self.rec.displays().is_empty() {
             return;
         }
         let Some((want, _, _)) = self.applied else { return };
@@ -414,7 +421,14 @@ impl App {
 
     /// Keep the bar's window the size the current phase wants, anchored at its bottom centre.
     fn place_bar(&mut self, ctx: &egui::Context) {
-        let screen_w = self.rec.displays().iter().find(|d| d.is_main).map(|d| d.width as f32).unwrap_or(1440.0);
+        let screen_w = self
+            .rec
+            .displays()
+            .iter()
+            .find(|d| d.is_main)
+            .map(|d| d.width as f32)
+            .or_else(|| ctx.input(|i| i.viewport().monitor_size).map(|m| m.x).filter(|w| *w > 0.0))
+            .unwrap_or(1440.0);
         let camera = self.prefs.camera;
         // While an editor is open the bar steps aside (a 1px window parked off screen keeps the
         // app's event loop running); it comes back when the last editor closes.
@@ -444,11 +458,11 @@ impl App {
                 let bottom = o.max.y;
                 Pos2::new(cx - want.x / 2.0, bottom - want.y)
             }
-            _ => self.home_pos(want),
+            _ => self.home_pos(ctx, want),
         };
         // after a recording the bar returns to its dock
         let pos = if docked && matches!(self.applied, Some((_, p, _)) if !matches!(p, Phase::Idle | Phase::Starting)) {
-            self.home_pos(want)
+            self.home_pos(ctx, want)
         } else {
             pos
         };
