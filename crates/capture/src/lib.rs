@@ -235,7 +235,23 @@ pub fn place_window_titled(title: &str, rect: (f64, f64, f64, f64)) -> bool {
         if hwnd.0.is_null() {
             return false;
         }
+        plain_window(hwnd);
         SetWindowPos(hwnd, Some(HWND_TOPMOST), px0, py0, (px1 - px0).max(1), (py1 - py0).max(1), SWP_NOACTIVATE).is_ok()
+    }
+}
+
+/// No Windows 11 drop shadow, accent border or rounded corners: on a 2-pixel window those show up
+/// as a thick, shaded band beside it.
+#[cfg(windows)]
+unsafe fn plain_window(hwnd: windows::Win32::Foundation::HWND) {
+    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMNCRP_DISABLED, DWMWA_BORDER_COLOR, DWMWA_NCRENDERING_POLICY, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND};
+    unsafe {
+        let policy = DWMNCRP_DISABLED;
+        let _ = DwmSetWindowAttribute(hwnd, DWMWA_NCRENDERING_POLICY, &policy as *const _ as _, std::mem::size_of_val(&policy) as u32);
+        let corner = DWMWCP_DONOTROUND;
+        let _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner as *const _ as _, std::mem::size_of_val(&corner) as u32);
+        let none: u32 = 0xFFFF_FFFE; // DWMWA_COLOR_NONE
+        let _ = DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &none as *const _ as _, 4);
     }
 }
 
