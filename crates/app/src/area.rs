@@ -139,7 +139,10 @@ impl Picker {
 /// drawn as a white or black block over the screen being recorded.
 fn draw_rec_frame(ctx: &egui::Context, rect: PRect) {
     const T: f32 = 3.0;
-    let (x, y, w, h) = (rect.x as f32, rect.y as f32, rect.width as f32, rect.height as f32);
+    // A few points in from the edges, so the whole border is on screen (and clear of edge
+    // gestures, auto-hidden taskbars and monitor bezels).
+    const INSET: f32 = 4.0;
+    let (x, y, w, h) = (rect.x as f32 + INSET, rect.y as f32 + INSET, rect.width as f32 - 2.0 * INSET, rect.height as f32 - 2.0 * INSET);
     let edges = [
         ("rec-top", Pos2::new(x, y), Vec2::new(w, T)),
         ("rec-bottom", Pos2::new(x, y + h - T), Vec2::new(w, T)),
@@ -163,6 +166,11 @@ fn draw_rec_frame(ctx: &egui::Context, rect: PRect) {
         ctx.show_viewport_immediate(ViewportId::from_hash_of(id), bar(id, pos, size), |ui, _| {
             ui.painter().rect_filled(ui.max_rect().expand(2.0), 0.0, DANGER);
         });
+    }
+    // Pin each edge to the display's exact physical pixels (logical window positions are off by
+    // a pixel or more at 200% scaling and across monitors with different scaling).
+    for (id, pos, size) in edges {
+        screencraft_capture::place_window_titled(id, (pos.x as f64, pos.y as f64, size.x as f64, size.y as f64));
     }
     // Keep the border and tag out of the recording (desktop duplication sees every window).
     for id in ["rec-top", "rec-bottom", "rec-left", "rec-right", "rec-tag"] {

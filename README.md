@@ -69,16 +69,24 @@ The recorder bar:
 **Recording**
 - A floating bar at the bottom of the screen: **Display / Window / Area** (drag out the area on the
   desktop), camera, microphone and system audio with level meters, resolution and frame rate, and a
-  3-2-1 countdown. While recording it shrinks to a timer, meters, discard and Stop.
+  3-2-1 countdown. While recording it shrinks to a timer, meters, discard and Stop, and a thin red
+  border (kept out of the video) marks the area being recorded.
 - System audio and the microphone as separate, time-aligned tracks; the camera is recorded to its own file.
 - The pointer is not baked into the picture. Cursor motion, clicks and shortcuts are logged on the
   same clock so the editor can redraw, smooth and restyle them.
 - Global shortcut: **⌘⇧R** on macOS, **Ctrl+Shift+R** elsewhere.
 
-**Editing** (one window per project; unsaved edits are asked about before it closes)
+**Projects** (the **Projects** menu in the editor, the folder button on the bar)
+- **New recording**, **Open project…** (any earlier recording), and the recent projects.
+- **Record more for this project** and **Add a recording or video to this project…**: the new
+  footage is joined onto the end as its own clip; zooms, captions and other edits stay where they are.
+
+**Editing** (one window per project; a **Save** button, `Ctrl+S`, and unsaved edits are asked about before it closes)
 - **Timeline:** video, zoom, camera, notes (annotations), captions and music tracks. Trim, split,
-  reorder, duplicate, per-clip speed, idle fast-forward, speed ramps and freeze frames. Zooms are
-  generated automatically the first time a recording opens.
+  reorder, duplicate, per-clip speed, idle fast-forward, speed ramps and freeze frames. Edits ripple:
+  zooms, captions and notes follow the footage, and music after a trimmed or deleted clip moves
+  with it. Zooms are generated automatically the first time a recording opens.
+- **Full-screen preview** (`F11`, or the button beside the preview quality; `Esc` leaves).
 - **Zoom and pan:** automatic regions from clicks and typing, or your own; follow the cursor or hold a point.
 - **Cursor and motion:** size, four styles, smoothing, click effects, highlight, camera smoothness.
 - **Appearance:** twelve procedural wallpapers (still or drifting / bokeh / waves / dust), gradient,
@@ -88,10 +96,14 @@ The recorder bar:
 - **Annotate:** text, arrows, boxes, circles, highlights, blur, pixelate and spotlight, dragged on
   the preview; on-screen **shortcut display**.
 - **Captions:** on-device speech recognition with whisper.cpp (the model is downloaded once, audio
-  never leaves the machine), SRT import / export, TikTok / classic / minimal styles.
+  never leaves the machine), SRT import / export, Subtitle / Minimal / TikTok styles.
 - **Transitions** at cuts: dissolve, fade, flash, blur, slide, zoom.
 - **Audio:** levels, **music** clips with fades and ducking under speech, and click / typing **sound effects**.
-- **Crop, aspect ratio, presets, undo / redo, raw-file access and an update check.**
+- **Crop, aspect ratio, presets, undo / redo and raw-file access.**
+
+**Defaults for app demos.** A new project fills the frame edge to edge on solid black (padding,
+corners and wallpapers are opt-in), with sentence-case subtitles on a dark box, a click ripple,
+1.6× auto-zoom, on-screen shortcuts, and music at 30% ducked under speech.
 
 **Export**
 | Format | Video | Audio |
@@ -136,6 +148,8 @@ permissions survive rebuilds.
 Download `screencraft_<version>.exe` from the [download page](https://screencraft.mdnlabs.dev/download).
 It installs per user into `%LOCALAPPDATA%\Programs\ScreenCraft`. Capture uses DXGI Desktop
 Duplication, system audio is a WASAPI loopback. The installer is unsigned, so SmartScreen may warn.
+On laptops with two graphics chips, the NVIDIA overlay may announce itself when ScreenCraft starts;
+it isn't used and can be switched off in the NVIDIA app.
 
 Build it yourself with Rust (MSVC toolchain, *Desktop development with C++*), CMake, LLVM and NSIS;
 the installer is named after the version (`screencraft_0_4_1.exe`):
@@ -143,6 +157,9 @@ the installer is named after the version (`screencraft_0_4_1.exe`):
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1
 ```
+
+Add `-Fast` for quick test builds (no LTO, incremental: a one-file change rebuilds in about 20 s).
+`sccache` is used automatically when it is installed.
 
 ### Linux
 
@@ -180,7 +197,7 @@ installer, `screencraft_0_4_1.dmg` (named after the version, like the Windows in
 3. Adjust the look, trim and split, add annotations, captions and music, then **Export**.
 
 Recordings live in `~/Movies/ScreenCraft` (`Videos\ScreenCraft` on Windows and Linux) as
-`<name>.screencraft` folders; the location can be changed from the **Projects** menu. 0.3 recordings
+`Recording <date> <time>.screencraft` folders (local time); the location can be changed from the **Projects** menu. 0.3 recordings
 open as they are.
 
 ### Shortcuts
@@ -188,7 +205,7 @@ open as they are.
 `Space` play / pause (hold for 2×) · `S` split · `Z` add a zoom · `Delete` remove the selection ·
 `⌘D` duplicate · `Q` / `E` start / end · `A` / `D` previous / next zoom · `←` `→` step a frame ·
 `⌘Z` / `⇧⌘Z` undo / redo · `⌘S` save · `⌘E` export · `⌘A` select all zooms ·
-`Ctrl/⌘ + scroll` zoom the timeline · `⌘⇧R` / `Ctrl+Shift+R` start / stop recording
+`F11` full-screen preview · `Ctrl/⌘ + scroll` zoom the timeline · `⌘⇧R` / `Ctrl+Shift+R` start / stop recording
 
 ## How it is built
 
@@ -226,6 +243,7 @@ cargo run --release -p screencraft      # run the app
 cargo run --release -p screencraft-engine --example make_demo -- /tmp/demo     # synthetic recording
 cargo run --release -p screencraft --bin screencraft-shot -- out.png --open /tmp/demo/Demo.screencraft --dark
 cargo run --release -p screencraft-engine --example export -- /tmp/demo/Demo.screencraft out.mp4 h264 1080 30
+cargo run --release -p screencraft-audio --example mic_probe -- <out_dir> 6    # microphone capture check
 python3 scripts/gen-notices.py          # refresh THIRD-PARTY-NOTICES.md after dependency changes
 ```
 
@@ -248,6 +266,8 @@ components ScreenCraft uses, and [COMPLIANCE.md](COMPLIANCE.md) for the legal an
 - Windows and Linux are much less tested than macOS. The Windows H.264 path (Media Foundation) is new.
 - Linux has no operating-system H.264, so recordings cannot be edited there yet; click and key
   logging works only on X11.
+- Adding footage to a project re-encodes its whole screen video; camera video of the added part is
+  not carried over, and camera-only projects can't be added to yet.
 - HEVC export / compression is not built; the compressor reads H.264 MP4s and carries Opus audio only.
 - Large sources (5K+) decode slower than real time when scrubbing.
 - No code signing or notarisation; macOS and Windows will warn on first launch.

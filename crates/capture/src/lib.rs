@@ -205,3 +205,41 @@ pub fn local_time() -> Option<(i64, i64, i64, i64, i64, i64)> {
 pub fn local_time() -> Option<(i64, i64, i64, i64, i64, i64)> {
     None
 }
+
+/// Put one of our top-level windows (found by its title) exactly on `rect`, given in the logical
+/// points of the display it is on, by converting to that display's physical pixels. Window
+/// positions in logical points drift by a pixel or more on scaled and mixed-DPI desktops.
+#[cfg(windows)]
+pub fn place_window_titled(title: &str, rect: (f64, f64, f64, f64)) -> bool {
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE};
+    let (x, y, w, h) = rect;
+    let (cx, cy) = (x + w / 2.0, y + h / 2.0);
+    let ds = monitors::displays();
+    let Some(d) = ds
+        .iter()
+        .find(|d| {
+            let (lx, ly, lw, lh) = d.logical();
+            cx >= lx && cx < lx + lw && cy >= ly && cy < ly + lh
+        })
+        .or(ds.first())
+    else {
+        return false;
+    };
+    let (px0, py0) = d.to_physical(x, y);
+    let (px1, py1) = d.to_physical(x + w, y + h);
+    let (px0, py0, px1, py1) = (px0.round() as i32, py0.round() as i32, px1.round() as i32, py1.round() as i32);
+    let wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        let Ok(hwnd) = FindWindowW(PCWSTR::null(), PCWSTR(wide.as_ptr())) else { return false };
+        if hwnd.0.is_null() {
+            return false;
+        }
+        SetWindowPos(hwnd, Some(HWND_TOPMOST), px0, py0, (px1 - px0).max(1), (py1 - py0).max(1), SWP_NOACTIVATE).is_ok()
+    }
+}
+
+#[cfg(not(windows))]
+pub fn place_window_titled(_title: &str, _rect: (f64, f64, f64, f64)) -> bool {
+    false
+}
