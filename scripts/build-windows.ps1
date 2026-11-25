@@ -11,7 +11,7 @@
 #   powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1
 #   powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -Out custom-name.exe
 # The installer is named after the version (0.4.1 -> screencraft_0_4_1.exe), like the macOS .dmg.
-param([string]$Out = "")
+param([string]$Out = "", [switch]$Fast)
 
 $ErrorActionPreference = "Stop"
 Set-Location (Join-Path $PSScriptRoot "..")
@@ -51,6 +51,13 @@ if (-not $env:LIBCLANG_PATH -and (Test-Path "C:\Program Files\LLVM\bin\libclang.
 # installed, also caches every rustc and C/C++ compile (whisper.cpp, libopus), so a clean
 # target\ or a dependency bump doesn't recompile everything from scratch.
 $sccache = (Get-Command sccache -ErrorAction SilentlyContinue).Source
+$cargoProfile = if ($Fast) { "fast" } else { "release" }
+if ($sccache -and $Fast) {
+    # incremental builds can't go through sccache for Rust; keep it for the C/C++ dependencies
+    $env:CMAKE_C_COMPILER_LAUNCHER = $sccache
+    $env:CMAKE_CXX_COMPILER_LAUNCHER = $sccache
+    $sccache = $null
+}
 if ($sccache) {
     $env:RUSTC_WRAPPER = $sccache
     $env:CMAKE_C_COMPILER_LAUNCHER = $sccache
@@ -63,7 +70,7 @@ if ($sccache) {
 }
 $sw = [Diagnostics.Stopwatch]::StartNew()
 
-cargo build --release -p screencraft
+cargo build --profile $cargoProfile -p screencraft
 if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
 
 $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
@@ -78,7 +85,7 @@ if (-not $makensis) {
 if (-not $makensis) { throw "makensis not found - install NSIS first (winget install NSIS.NSIS)" }
 
 if (-not $Out) { $Out = "screencraft_$($version -replace '\.', '_').exe" }
-$exe = (Resolve-Path "target\release\screencraft.exe").Path
+$exe = (Resolve-Path "target\$cargoProfile\screencraft.exe").Path
 $ico = (Resolve-Path "assets\icons\icon.ico").Path
 $outPath = Join-Path (Get-Location) $Out
 

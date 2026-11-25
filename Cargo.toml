@@ -18,3 +18,11 @@ license = "MIT"
 [profile.release]
 lto = "thin"
 codegen-units = 4
+
+# Quick test builds (build-windows.ps1 -Fast): release speed for the app, but no LTO, many
+# codegen units and incremental compilation, so a one-file change rebuilds on every core.
+[profile.fast]
+inherits = "release"
+lto = false
+codegen-units = 256
+incremental = true

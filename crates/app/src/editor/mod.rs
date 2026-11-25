@@ -195,6 +195,8 @@ pub struct EditorState {
     pub compress_request: Option<std::path::PathBuf>,
     /// Asked from the Projects menu: leave this editor to record, or add footage to this project.
     pub footage_request: Option<FootageRequest>,
+    /// The preview fills the whole screen (F11 / the full-screen button; Esc leaves).
+    pub full_preview: bool,
     /// Waveform peaks (0..1, 3000 bins) of music files, filled in by a worker.
     pub music_peaks: HashMap<String, Arc<Vec<f32>>>,
     peaks_pending: std::collections::HashSet<String>,
@@ -287,6 +289,7 @@ impl EditorState {
             open_request: None,
             compress_request: None,
             footage_request: None,
+            full_preview: false,
             music_peaks: HashMap::new(),
             peaks_pending: Default::default(),
             peaks_tx: ptx,
@@ -1139,6 +1142,25 @@ impl EditorState {
         self.handle_keys(&ctx);
         self.wants_back = false;
 
+        let (f11, esc) = ctx.input(|i| (i.key_pressed(egui::Key::F11), i.key_pressed(egui::Key::Escape)));
+        if f11 || (esc && self.full_preview) {
+            self.set_full_preview(&ctx, !self.full_preview && f11);
+        }
+        if self.full_preview {
+            egui::CentralPanel::default().frame(egui::Frame::NONE.fill(Color32::BLACK)).show(ui, |ui| {
+                let r = ui.max_rect();
+                let tr_h = 46.0;
+                self.show_preview(ui, Rect::from_min_max(r.min, Pos2::new(r.max.x, r.max.y - tr_h - 16.0)));
+                self.transport(ui, Rect::from_min_max(Pos2::new(r.min.x + 16.0, r.max.y - tr_h - 8.0), Pos2::new(r.max.x - 16.0, r.max.y - 8.0)));
+                let b = Rect::from_min_size(Pos2::new(r.max.x - 44.0, r.min.y + 12.0), Vec2::splat(32.0));
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(b));
+                if kit::icon_btn_sized(&mut child, "close", "Leave full screen (Esc)", 32.0, 16.0, true).clicked() {
+                    self.set_full_preview(&ctx, false);
+                }
+            });
+            return self.wants_back;
+        }
+
         egui::Panel::top("editor-top")
             .exact_size(48.0)
             .frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::symmetric(8, 0)))
@@ -1223,6 +1245,11 @@ impl EditorState {
                 ui.add_space(6.0);
                 if kit::primary(ui, Some("export"), "Export").clicked() {
                     self.export.open = true;
+                }
+                let (label, tip) = if self.dirty { ("Save", "Save your edits to the project (Ctrl+S)") } else { ("Saved", "All edits are saved in the project") };
+                let r = kit::pill(ui, Some(if self.dirty { "download" } else { "check" }), label, false, false, false, None);
+                if r.on_hover_text(tip).clicked() && self.dirty {
+                    self.save_now();
                 }
                 let r = kit::pill(ui, Some("sparkle"), "Presets", self.dialogs.presets_open, false, true, None);
                 if r.clicked() {
@@ -1349,6 +1376,14 @@ impl EditorState {
         });
     }
 
+    /// Show the preview alone, filling the screen, or go back to the editor layout.
+    pub fn set_full_preview(&mut self, ctx: &egui::Context, on: bool) {
+        if self.full_preview != on {
+            self.full_preview = on;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(on));
+        }
+    }
+
     fn stage(&mut self, ui: &mut egui::Ui) {
         let full = ui.max_rect();
         // radial gradient: ellipse at 50% 30%, #0e1624 -> bg at 70%
@@ -1381,6 +1416,10 @@ impl EditorState {
         bar_ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let opts = [(540u32, "Fast"), (720, "Balanced"), (1080, "Full")];
             let cur = opts.iter().find(|o| o.0 == self.preview_res).map(|o| o.1).unwrap_or("Balanced");
+            if kit::icon_btn_sized(ui, "area", "Full-screen preview (F11)", 30.0, 16.0, true).clicked() {
+                let ctx = ui.ctx().clone();
+                self.set_full_preview(&ctx, true);
+            }
             if let Some(i) = kit::select(ui, "preview", cur, &["Fast", "Balanced", "Full"], 90.0) {
                 self.preview_res = opts[i].0;
             }
