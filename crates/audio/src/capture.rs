@@ -50,16 +50,32 @@ fn build(
         ($t:ty, $conv:expr) => {{
             let clock = clock.clone();
             let tx = tx.clone();
+            // Time blocks by counting samples from the first one. The callback's own arrival time
+            // jitters by 10-20 ms, which the aligner would "correct" with bursts of silence and
+            // dropped audio (audible as crackle). Resync to the clock only after a real gap.
+            let mut base_ns: Option<u64> = None;
+            let mut counted: u64 = 0;
             device.build_input_stream(
                 &sc,
                 move |data: &[$t], _| {
                     let frames = data.len() / channels.max(1) as usize;
-                    let dur = frames as u64 * 1_000_000_000 / rate.max(1) as u64;
-                    let end = clock.now_ns();
+                    let r = rate.max(1) as u64;
+                    let dur = frames as u64 * 1_000_000_000 / r;
+                    let measured = clock.now_ns().saturating_sub(dur);
+                    let predicted = base_ns.map(|b| b + counted * 1_000_000_000 / r);
+                    let pts = match predicted {
+                        Some(p) if (measured as i64 - p as i64).abs() < 100_000_000 => p,
+                        _ => {
+                            base_ns = Some(measured);
+                            counted = 0;
+                            measured
+                        }
+                    };
+                    counted += frames as u64;
                     let conv: fn($t) -> f32 = $conv;
                     let _ = tx.send(AudioBlock {
                         source,
-                        pts_ns: end.saturating_sub(dur),
+                        pts_ns: pts,
                         sample_rate: rate,
                         channels,
                         data: data.iter().map(|&s| conv(s)).collect(),
