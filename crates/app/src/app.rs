@@ -396,6 +396,40 @@ impl App {
         Pos2::new(r.center().x - want.x / 2.0, r.center().y - want.y / 2.0)
     }
 
+    /// The display a new window belongs on: the one holding the recorder bar's saved spot, else
+    /// the main display (or, before the display list loads, the monitor the app opened on).
+    fn home_display(&self, ctx: &egui::Context) -> egui::Rect {
+        let rects: Vec<egui::Rect> = self
+            .rec
+            .displays()
+            .iter()
+            .map(|d| egui::Rect::from_min_size(Pos2::new(d.x as f32, d.y as f32), Vec2::new(d.width as f32, d.height as f32)))
+            .collect();
+        if let Some([ax, ay]) = self.prefs.bar_anchor {
+            if let Some(r) = rects.iter().find(|r| r.contains(Pos2::new(ax, ay - 1.0))) {
+                return *r;
+            }
+        }
+        let main = self.rec.displays().iter().position(|d| d.is_main);
+        if let Some(r) = main.and_then(|i| rects.get(i)) {
+            return *r;
+        }
+        let monitor = ctx.input(|i| i.viewport().monitor_size).filter(|m| m.x > 0.0 && m.y > 0.0);
+        egui::Rect::from_min_size(Pos2::ZERO, monitor.unwrap_or(Vec2::new(1440.0, 900.0)))
+    }
+
+    /// Size, position and minimum size for a window that would like to be `want` but must fit
+    /// on its display (a 1280x800 laptop can't hold a 1440x900 editor), centred there.
+    pub(crate) fn fit_window(&self, ctx: &egui::Context, want: Vec2, min: Vec2) -> (Vec2, Pos2, Vec2) {
+        let d = self.home_display(ctx);
+        // leave room for the taskbar and the window frame
+        let room = Vec2::new((d.width() - 24.0).max(320.0), (d.height() - 96.0).max(240.0));
+        let size = want.min(room);
+        let min = min.min(size);
+        let pos = Pos2::new(d.center().x - size.x / 2.0, (d.min.y + (d.height() - 48.0 - size.y) / 2.0).max(d.min.y));
+        (size, pos, min)
+    }
+
     /// Remember where the user dragged the idle bar, so the next start puts it back there.
     fn remember_bar(&mut self, ctx: &egui::Context) {
         if self.rec.phase != Phase::Idle || !self.editors.is_empty() || self.rec.menu.is_some() || self.rec.displays().is_empty() {
@@ -561,7 +595,8 @@ impl App {
         let mut i = 0;
         while i < self.editors.len() {
             let (id, title) = (self.editors[i].id, self.editors[i].title.clone());
-            let builder = ViewportBuilder::default().with_title(title).with_inner_size([1440.0, 900.0]).with_min_inner_size([980.0, 620.0]);
+            let (size, pos, min) = self.fit_window(&ctx, Vec2::new(1440.0, 900.0), Vec2::new(980.0, 620.0));
+            let builder = ViewportBuilder::default().with_title(title).with_inner_size(size).with_position(pos).with_min_inner_size(min);
             let mut close = false;
             {
                 let ed = &mut self.editors[i].ed;
