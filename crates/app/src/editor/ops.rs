@@ -376,3 +376,25 @@ mod tests {
         assert!(sl[1..9].iter().all(|x| x.ramp));
     }
 }
+
+/// Ripple the music after a clip changed length or was deleted: music placed after the clip's
+/// old end moves by as much as the timeline grew or shrank there. (Zooms, captions and notes
+/// are pinned to the recording itself, so they already follow the video.)
+pub fn ripple_music(p: &mut Project, before: &[Slice], id: &str) {
+    let Some(i) = before.iter().position(|s| s.id == id) else { return };
+    let old_start: f64 = before[..i].iter().map(slice_len).sum();
+    let old_end = old_start + slice_len(&before[i]);
+    let new_end = match p.scene.slices.iter().position(|s| s.id == id) {
+        Some(j) => p.scene.slices[..=j].iter().map(slice_len).sum(),
+        None => old_start,
+    };
+    let delta = new_end - old_end;
+    if delta.abs() < 0.5 {
+        return;
+    }
+    for c in &mut p.scene.music_clips {
+        if c.offset_ms >= old_end - 1.0 {
+            c.offset_ms = (c.offset_ms + delta).max(new_end.min(c.offset_ms));
+        }
+    }
+}

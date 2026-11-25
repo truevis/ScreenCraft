@@ -1157,6 +1157,7 @@ fn commit(st: &mut EditorState, kind: Kind, id: &str, mode: Mode, group: bool, a
                         if next_joined {
                             ne = ne.min(p.scene.slices[i + 1].source_end_ms - 40.0);
                         }
+                        let before = p.scene.slices.clone();
                         let x = &mut p.scene.slices[i];
                         x.source_start_ms = ns.clamp(0.0, ne - 200.0);
                         x.source_end_ms = ne.clamp(x.source_start_ms + 200.0, dur);
@@ -1167,6 +1168,7 @@ fn commit(st: &mut EditorState, kind: Kind, id: &str, mode: Mode, group: bool, a
                         if next_joined {
                             p.scene.slices[i + 1].source_start_ms = new_e;
                         }
+                        super::ops::ripple_music(p, &before, &id);
                     });
                 }
             }

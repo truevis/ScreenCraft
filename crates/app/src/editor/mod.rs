@@ -922,7 +922,11 @@ impl EditorState {
             }
             Sel::Slice(id) => {
                 if self.project.scene.slices.len() > 1 {
-                    self.edit(|p| p.scene.slices.retain(|s| s.id != id));
+                    self.edit(|p| {
+                        let before = p.scene.slices.clone();
+                        p.scene.slices.retain(|s| s.id != id);
+                        ops::ripple_music(p, &before, &id);
+                    });
                     let d = self.duration_ms();
                     self.seek(self.playhead_ms.min(d));
                 }
