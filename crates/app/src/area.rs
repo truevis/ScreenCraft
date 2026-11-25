@@ -138,11 +138,11 @@ impl Picker {
 /// full-screen transparent window. On hybrid Intel + NVIDIA laptops the transparent window was
 /// drawn as a white or black block over the screen being recorded.
 fn draw_rec_frame(ctx: &egui::Context, rect: PRect) {
-    const T: f32 = 3.0;
-    // A few points in from the edges, so the whole border is on screen (and clear of edge
-    // gestures, auto-hidden taskbars and monitor bezels).
-    const INSET: f32 = 4.0;
-    let (x, y, w, h) = (rect.x as f32 + INSET, rect.y as f32 + INSET, rect.width as f32 - 2.0 * INSET, rect.height as f32 - 2.0 * INSET);
+    // A hairline on the very edges of what is being recorded: 1 point (2 px at 200% scaling) of
+    // muted red. The bar's timer already says a recording is running, so there is no tag.
+    const T: f32 = 1.0;
+    const COLOR: Color32 = Color32::from_rgb(214, 64, 76);
+    let (x, y, w, h) = (rect.x as f32, rect.y as f32, rect.width as f32, rect.height as f32);
     let edges = [
         ("rec-top", Pos2::new(x, y), Vec2::new(w, T)),
         ("rec-bottom", Pos2::new(x, y + h - T), Vec2::new(w, T)),
@@ -164,28 +164,16 @@ fn draw_rec_frame(ctx: &egui::Context, rect: PRect) {
     };
     for (id, pos, size) in edges {
         ctx.show_viewport_immediate(ViewportId::from_hash_of(id), bar(id, pos, size), |ui, _| {
-            ui.painter().rect_filled(ui.max_rect().expand(2.0), 0.0, DANGER);
+            ui.painter().rect_filled(ui.max_rect().expand(2.0), 0.0, COLOR);
         });
     }
     // Pin each edge to the display's exact physical pixels (logical window positions are off by
     // a pixel or more at 200% scaling and across monitors with different scaling).
     for (id, pos, size) in edges {
         screencraft_capture::place_window_titled(id, (pos.x as f64, pos.y as f64, size.x as f64, size.y as f64));
-    }
-    // Keep the border and tag out of the recording (desktop duplication sees every window).
-    for id in ["rec-top", "rec-bottom", "rec-left", "rec-right", "rec-tag"] {
+        // keep the border out of the recording (desktop duplication sees every window)
         screencraft_capture::exclude_window_titled(id);
     }
-    // The tag sits just above the top-left corner, or just inside it at the top of a display.
-    let tag_size = Vec2::new(52.0, 22.0);
-    let tag_y = if y >= tag_size.y + 6.0 { y - tag_size.y - 6.0 } else { y + T + 4.0 };
-    ctx.show_viewport_immediate(ViewportId::from_hash_of("rec-tag"), bar("rec-tag", Pos2::new(x + T + 4.0, tag_y), tag_size), |ui, _| {
-        let r = ui.max_rect();
-        let p = ui.painter();
-        p.rect_filled(r.expand(2.0), 0.0, DANGER);
-        p.circle_filled(Pos2::new(r.min.x + 12.0, r.center().y), 3.5, Color32::WHITE);
-        p.text(Pos2::new(r.min.x + 22.0, r.center().y), Align2::LEFT_CENTER, "REC", kit::font(11.0), Color32::WHITE);
-    });
 }
 
 /// The click-through outline around `rect` (global logical points): `sel` the chosen area, `hl` a
