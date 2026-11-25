@@ -1,4 +1,4 @@
-//! ScreenCraft project document. Serialised as `project.json` inside a
+﻿//! ScreenCraft project document. Serialised as `project.json` inside a
 //! `.screencraft` package directory next to the recorded media.
 
 use crate::spring::SpringConfig;
@@ -512,9 +512,9 @@ pub struct Background {
 impl Default for Background {
     fn default() -> Self {
         Self {
-            kind: "wallpaper".into(),
+            kind: "color".into(),
             wallpaper: "sunset".into(),
-            color: "#4776e6".into(),
+            color: "#000000".into(),
             gradient_from: "#4776e6".into(),
             gradient_to: "#8e54e9".into(),
             gradient_angle: 135.0,
@@ -540,8 +540,9 @@ pub struct Styles {
 impl Default for Styles {
     fn default() -> Self {
         Self {
-            padding_ratio: 0.02,
-            corner_radius: 16.0,
+            // A recording fills the frame edge to edge; padding and corners are opt-in.
+            padding_ratio: 0.0,
+            corner_radius: 0.0,
             shadow: Shadow::default(),
             inset: Inset::default(),
             background: Background::default(),
@@ -796,6 +797,6 @@ mod tests {
     fn missing_fields_use_defaults() {
         let q: Project = serde_json::from_str(r#"{"name":"x","config":{"cursor":{"size":40}}}"#).unwrap();
         assert_eq!(q.config.cursor.size, 40.0);
-        assert_eq!(q.config.styles.corner_radius, 16.0);
+        assert_eq!(q.config.styles.corner_radius, 0.0);
     }
 }

@@ -193,3 +193,15 @@ pub fn exclude_window_titled(_title: &str) -> bool {
 pub fn set_excluded_from_capture(_hwnd: isize, _excluded: bool) -> bool {
     false
 }
+
+/// The local wall-clock time: (year, month, day, hour, minute, second).
+#[cfg(windows)]
+pub fn local_time() -> Option<(i64, i64, i64, i64, i64, i64)> {
+    let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+    Some((t.wYear as i64, t.wMonth as i64, t.wDay as i64, t.wHour as i64, t.wMinute as i64, t.wSecond as i64))
+}
+
+#[cfg(not(windows))]
+pub fn local_time() -> Option<(i64, i64, i64, i64, i64, i64)> {
+    None
+}

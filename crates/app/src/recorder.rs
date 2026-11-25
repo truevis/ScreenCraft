@@ -1217,7 +1217,11 @@ fn format_time(secs: u64) -> String {
 }
 
 pub fn timestamp() -> String {
-    // Local-time stamp without a date crate: seconds since epoch broken into UTC fields.
+    // The recording's start in local time, as the name of its folder.
+    if let Some((y, m, d, hh, mm, ss)) = screencraft_capture::local_time() {
+        return format!("{y:04}-{m:02}-{d:02} {hh:02}.{mm:02}.{ss:02}");
+    }
+    // Fallback without a date crate: seconds since epoch broken into UTC fields.
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as i64;
     let days = secs.div_euclid(86_400);
     let rem = secs.rem_euclid(86_400);
