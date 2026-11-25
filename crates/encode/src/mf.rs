@@ -10,6 +10,7 @@ use crate::codec::VideoEncoder;
 use crate::h264::{annexb_to_avcc, avcc_to_annexb, build_avcc};
 use crate::types::*;
 use crate::{Error, Result};
+use std::collections::VecDeque;
 use std::mem::ManuallyDrop;
 use std::sync::Once;
 use windows::core::Interface;
@@ -90,8 +91,15 @@ unsafe fn drain(mft: &IMFTransform, provides_samples: bool, out_size: u32) -> wi
                 }
                 let _ = ManuallyDrop::into_inner(std::mem::replace(&mut buf[0].pEvents, ManuallyDrop::new(None)));
             }
-            Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => break,
-            Err(e) => return Err(e),
+            Err(e) => {
+                // ProcessOutput fails without releasing the sample we handed it.
+                let _ = ManuallyDrop::into_inner(std::mem::replace(&mut buf[0].pSample, ManuallyDrop::new(None)));
+                let _ = ManuallyDrop::into_inner(std::mem::replace(&mut buf[0].pEvents, ManuallyDrop::new(None)));
+                if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT {
+                    break;
+                }
+                return Err(e);
+            }
         }
     }
     Ok(out)
@@ -103,6 +111,10 @@ pub struct MfH264Encoder {
     avcc: Vec<u8>,
     provides: bool,
     out_size: u32,
+    /// Presentation times of frames still inside the encoder, in submission order.
+    /// Media Foundation's sample times are not monotonic once B-frames are enabled, and the
+    /// muxer rejects a decreasing timestamp before it can write `moov`.
+    pending_pts: VecDeque<i64>,
 }
 
 // The transform is only used through &mut self from one thread at a time.
@@ -113,6 +125,10 @@ impl MfH264Encoder {
         init()?;
         unsafe {
             let mft: IMFTransform = CoCreateInstance(&CLSID_MSH264EncoderMFT, None, CLSCTX_INPROC_SERVER).map_err(|e| err("no H.264 encoder", e))?;
+            // Low latency disables frame reordering, so output order matches the pts queue.
+            if let Ok(attrs) = mft.GetAttributes() {
+                let _ = attrs.SetUINT32(&MF_LOW_LATENCY, 1);
+            }
             let fps = (cfg.fps_num, cfg.fps_den.max(1));
             let out_t = video_type(&MFVideoFormat_H264, cfg.width, cfg.height, fps).map_err(|e| err("encoder type", e))?;
             out_t.SetUINT32(&MF_MT_AVG_BITRATE, cfg.bitrate_kbps.saturating_mul(1000)).map_err(|e| err("bitrate", e))?;
@@ -124,14 +140,34 @@ impl MfH264Encoder {
             mft.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0).map_err(|e| err("start", e))?;
             let info = mft.GetOutputStreamInfo(0).map_err(|e| err("stream info", e))?;
             let provides = info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 != 0;
-            Ok(Self { mft, cfg: cfg.clone(), avcc: Vec::new(), provides, out_size: info.cbSize.max(1 << 20) })
+            Ok(Self { mft, cfg: cfg.clone(), avcc: Vec::new(), provides, out_size: info.cbSize.max(1 << 20), pending_pts: VecDeque::new() })
+        }
+    }
+
+    /// The encoder signals a new output type (often once SPS/PPS exist, and again on drain).
+    unsafe fn renegotiate(&mut self) -> Result<()> {
+        let t = self.mft.GetOutputAvailableType(0, 0).map_err(|e| err("encoder output type", e))?;
+        self.mft.SetOutputType(0, &t, 0).map_err(|e| err("encoder output type", e))?;
+        let info = self.mft.GetOutputStreamInfo(0).map_err(|e| err("stream info", e))?;
+        self.provides = info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 != 0;
+        self.out_size = info.cbSize.max(1 << 20);
+        Ok(())
+    }
+
+    unsafe fn drain_encoder(&mut self) -> Result<Vec<IMFSample>> {
+        loop {
+            match drain(&self.mft, self.provides, self.out_size) {
+                Ok(samples) => return Ok(samples),
+                Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE => self.renegotiate()?,
+                Err(e) => return Err(err("encode output", e)),
+            }
         }
     }
 
     fn collect(&mut self, samples: Vec<IMFSample>) -> Result<Vec<Packet>> {
         let mut out = Vec::new();
         for s in samples {
-            let (bytes, pts) = unsafe { (sample_bytes(&s).map_err(|e| err("read output", e))?, s.GetSampleTime().unwrap_or(0) / 10) };
+            let bytes = unsafe { sample_bytes(&s).map_err(|e| err("read output", e))? };
             let (data, ps, key) = annexb_to_avcc(&bytes);
             if let Some((sps, pps)) = ps {
                 if self.avcc.is_empty() {
@@ -139,6 +175,7 @@ impl MfH264Encoder {
                 }
             }
             if !data.is_empty() {
+                let pts = self.pending_pts.pop_front().unwrap_or(0);
                 out.push(Packet { data, pts_us: pts, key });
             }
         }
@@ -168,10 +205,11 @@ impl VideoEncoder for MfH264Encoder {
             nv.push(f.v[i]);
         }
         let dur = self.cfg.frame_duration_us() * 10;
+        self.pending_pts.push_back(pts_us);
         let samples = unsafe {
             let s = sample_from(&nv, pts_us * 10, dur).map_err(|e| err("input sample", e))?;
             self.mft.ProcessInput(0, &s, 0).map_err(|e| err("encode", e))?;
-            drain(&self.mft, self.provides, self.out_size).map_err(|e| err("encode output", e))?
+            self.drain_encoder()?
         };
         self.collect(samples)
     }
@@ -180,7 +218,10 @@ impl VideoEncoder for MfH264Encoder {
         let samples = unsafe {
             self.mft.ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0).map_err(|e| err("flush", e))?;
             self.mft.ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0).map_err(|e| err("flush", e))?;
-            drain(&self.mft, self.provides, self.out_size).map_err(|e| err("flush output", e))?
+            self.drain_encoder().map_err(|e| match e {
+                Error::Codec(m) if m.starts_with("encode output") => Error::Codec(m.replacen("encode output", "flush output", 1)),
+                other => other,
+            })?
         };
         self.collect(samples)
     }

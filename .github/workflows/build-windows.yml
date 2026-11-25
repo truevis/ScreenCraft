@@ -26,10 +26,13 @@ jobs:
             exit 1
           }
           $names = @(git diff --name-only $pin HEAD)
-          $allowed = ".github/workflows/build-windows.yml"
-          $unexpected = @($names | Where-Object { $_ -ne $allowed })
-          if ($names.Count -ne 1 -or $unexpected.Count -ne 0) {
-            Write-Error "Tree differs from pin by more than the workflow: $($names -join ', ')"
+          $allowed = @(
+            ".github/workflows/build-windows.yml",
+            "crates/encode/src/mf.rs"
+          )
+          $unexpected = @($names | Where-Object { $allowed -notcontains $_ })
+          if ($unexpected.Count -ne 0 -or $names.Count -eq 0) {
+            Write-Error "Tree differs from pin outside the workflow and encoder fix: $($names -join ', ')"
             exit 1
           }
           @"
