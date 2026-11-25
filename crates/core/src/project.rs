@@ -241,20 +241,20 @@ pub struct SubtitleStyle {
 
 impl Default for SubtitleStyle {
     fn default() -> Self {
-        // TikTok's classic caption: heavy white text with a thick black outline, centred in the
-        // middle cell of the bottom row of a 3x3 grid.
+        // Broadcast-style subtitles for product demos: sentence case on a dark translucent box
+        // near the bottom, kept clear of the app's own UI. "TikTok" stays one click away.
         Self {
-            style: "tiktok".into(),
-            size: 70.0,
+            style: "classic".into(),
+            size: 40.0,
             color: "#ffffff".into(),
             outline_color: "#000000".into(),
-            outline_width: 7.0,
-            background: String::new(),
-            uppercase: true,
-            y: 0.8,
-            width: 0.6,
-            pop: true,
-            highlight: "#ffe14a".into(),
+            outline_width: 0.0,
+            background: "#0b0f17cc".into(),
+            uppercase: false,
+            y: 0.9,
+            width: 0.7,
+            pop: false,
+            highlight: String::new(),
         }
     }
 }
@@ -406,7 +406,8 @@ impl Default for CursorConfig {
             always_use_pointer: false,
             hide_not_moving_after_ms: None,
             loop_position_before_end_ms: None,
-            click_effect: ClickEffect::None,
+            // a soft ripple shows the viewer where each click lands
+            click_effect: ClickEffect::Ripple,
             click_effect_color: "#ffffff".into(),
             click_sound: None,
             click_sound_volume: 0.25,
@@ -595,7 +596,8 @@ impl Default for Animations {
             mouse_spring: SpringConfig::default(),
             screen_spring: SpringConfig::default(),
             motion_blur: 1.0,
-            default_zoom: 2.0,
+            // close enough to read a control, wide enough to keep the app in context
+            default_zoom: 1.6,
             follow: "center".into(),
             ease_in_ms: 500.0,
             ease_out_ms: 500.0,
@@ -640,7 +642,7 @@ impl Default for AudioConfig {
             volume: 0.5,
             mic_volume: 1.0,
             device_volume: 1.0,
-            music_volume: 0.5,
+            music_volume: 0.3,
             mute_microphone: false,
             mute_system_audio: false,
             click_sounds: false,
@@ -649,7 +651,7 @@ impl Default for AudioConfig {
             key_sounds: false,
             key_style: "mechanical".into(),
             key_volume: 0.5,
-            duck_music: false,
+            duck_music: true,
             duck_level: 0.3,
         }
     }
@@ -692,7 +694,8 @@ pub struct KeystrokeConfig {
 
 impl Default for KeystrokeConfig {
     fn default() -> Self {
-        Self { enabled: false, position: "bottom-center".into(), size: 30.0, hold_ms: 1400.0 }
+        // shortcuts (Ctrl+S, Esc ...) are part of an app demo; plain typing is never shown
+        Self { enabled: true, position: "bottom-right".into(), size: 26.0, hold_ms: 1400.0 }
     }
 }
 

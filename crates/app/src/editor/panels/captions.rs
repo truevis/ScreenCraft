@@ -23,15 +23,7 @@ pub fn preset(name: &str, s: &mut screencraft_core::project::SubtitleStyle) {
             s.width = 0.6;
         }
         "classic" => {
-            s.style = "classic".into();
-            s.size = 46.0;
-            s.color = "#ffffff".into();
-            s.outline_color = "#000000".into();
-            s.outline_width = 0.0;
-            s.background = "#000000b3".into();
-            s.uppercase = false;
-            s.pop = false;
-            s.highlight = String::new();
+            *s = screencraft_core::project::SubtitleStyle::default();
         }
         _ => {
             s.style = "minimal".into();
@@ -98,7 +90,7 @@ impl CapState {
 pub fn show(st: &mut EditorState, ui: &mut Ui) {
     let sty = st.project.config.subtitles.clone();
     if !matches!(sty.style.as_str(), "tiktok" | "classic" | "minimal") {
-        st.edit(|p| preset("tiktok", &mut p.config.subtitles));
+        st.edit(|p| preset("classic", &mut p.config.subtitles));
     }
     let mut list = st.project.scene.subtitles.clone();
     list.sort_by(|a, b| a.source_start_ms.partial_cmp(&b.source_start_ms).unwrap_or(std::cmp::Ordering::Equal));
@@ -185,7 +177,7 @@ pub fn show(st: &mut EditorState, ui: &mut Ui) {
     }
 
     kit::h3(ui, "Style", false);
-    let presets: Vec<(String, &str)> = vec![("tiktok".into(), "TikTok"), ("classic".into(), "Classic"), ("minimal".into(), "Minimal")];
+    let presets: Vec<(String, &str)> = vec![("classic".into(), "Subtitle"), ("minimal".into(), "Minimal"), ("tiktok".into(), "TikTok")];
     seg(st, ui, Some("Preset"), &presets, sty.style.clone(), |p, v| preset(&v, &mut p.config.subtitles));
     let sty = st.project.config.subtitles.clone();
     slider(st, ui, "sub-size", "Size", sty.size, (24.0, 120.0, 1.0), px, |p, v| p.config.subtitles.size = v);

@@ -235,7 +235,7 @@ impl EditorState {
                 let first = self.project.scene.subtitles.is_empty();
                 self.edit(|p| {
                     if first {
-                        super::panels::caption_preset("tiktok", &mut p.config.subtitles);
+                        super::panels::caption_preset("classic", &mut p.config.subtitles);
                     }
                     for (c, id) in caps.into_iter().zip(ids) {
                         p.scene.subtitles.push(screencraft_core::project::Subtitle {
