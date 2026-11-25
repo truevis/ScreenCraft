@@ -265,6 +265,8 @@ pub struct MfH264Decoder {
     out_size: u32,
     width: u32,
     height: u32,
+    /// Rows in the decoded buffer: the coded height, padded to 16 (1080 → 1088).
+    buf_rows: u32,
     stride: u32,
     t: i64,
 }
@@ -276,11 +278,16 @@ impl MfH264Decoder {
         init()?;
         unsafe {
             let mft: IMFTransform = CoCreateInstance(&CLSID_MSH264DecoderMFT, None, CLSCTX_INPROC_SERVER).map_err(|e| err("no H.264 decoder", e))?;
+            // Without this the decoder holds several pictures back; the editor needs one
+            // picture out for each sample in (recordings have no B-frames).
+            if let Ok(attrs) = mft.GetAttributes() {
+                let _ = attrs.SetUINT32(&MF_LOW_LATENCY, 1);
+            }
             let in_t = MFCreateMediaType().map_err(|e| err("decoder type", e))?;
             in_t.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video).map_err(|e| err("decoder type", e))?;
             in_t.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264).map_err(|e| err("decoder type", e))?;
             mft.SetInputType(0, &in_t, 0).map_err(|e| err("decoder input type", e))?;
-            let mut d = Self { mft, params: params.to_vec(), length_size, provides: false, out_size: 0, width: 0, height: 0, stride: 0, t: 0 };
+            let mut d = Self { mft, params: params.to_vec(), length_size, provides: false, out_size: 0, width: 0, height: 0, buf_rows: 0, stride: 0, t: 0 };
             d.pick_output()?;
             d.mft.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0).map_err(|e| err("start", e))?;
             d.mft.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0).map_err(|e| err("start", e))?;
@@ -297,11 +304,23 @@ impl MfH264Decoder {
                 self.mft.SetOutputType(0, &t, 0).map_err(|e| err("decoder output type", e))?;
                 let fs = t.GetUINT64(&MF_MT_FRAME_SIZE).unwrap_or(0);
                 self.width = (fs >> 32) as u32;
-                self.height = fs as u32;
-                self.stride = t.GetUINT32(&MF_MT_DEFAULT_STRIDE).unwrap_or(self.width);
+                self.buf_rows = fs as u32;
+                self.height = self.buf_rows;
+                // The visible picture (e.g. 1920x1080 inside a 1920x1088 buffer).
+                let mut area = [0u8; 16];
+                let mut got = 0u32;
+                if t.GetBlob(&MF_MT_MINIMUM_DISPLAY_APERTURE, &mut area, Some(&mut got)).is_ok() && got as usize >= 16 {
+                    let cx = i32::from_le_bytes([area[8], area[9], area[10], area[11]]);
+                    let cy = i32::from_le_bytes([area[12], area[13], area[14], area[15]]);
+                    if cx > 0 && cy > 0 && cx as u32 <= self.width && cy as u32 <= self.buf_rows {
+                        self.width = cx as u32;
+                        self.height = cy as u32;
+                    }
+                }
+                self.stride = t.GetUINT32(&MF_MT_DEFAULT_STRIDE).unwrap_or(fs.wrapping_shr(32) as u32);
                 let info = self.mft.GetOutputStreamInfo(0).map_err(|e| err("stream info", e))?;
                 self.provides = info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 != 0;
-                self.out_size = info.cbSize.max(self.width * self.height * 3 / 2);
+                self.out_size = info.cbSize.max(self.stride.max(self.width) * self.buf_rows * 3 / 2);
                 return Ok(());
             }
             i += 1;
@@ -310,6 +329,7 @@ impl MfH264Decoder {
 
     /// Feed one length-prefixed access unit; returns the picture when one is ready.
     pub fn decode(&mut self, sample: &[u8]) -> Result<Option<I420>> {
+        init()?;
         let key = sample.len() > self.length_size && {
             // an IDR slice carries the parameter sets in front of it for the decoder
             let mut i = 0;
@@ -332,33 +352,61 @@ impl MfH264Decoder {
         unsafe {
             let s = sample_from(&annexb, self.t, 333_333).map_err(|e| err("input sample", e))?;
             self.t += 333_333;
-            match self.mft.ProcessInput(0, &s, 0) {
-                Ok(()) => {}
-                Err(e) if e.code() == MF_E_NOTACCEPTING => {}
-                Err(e) => return Err(err("decode", e)),
-            }
+            let mut pics = Vec::new();
+            // A decoder that still holds output refuses input until it is drained.
+            let mut tries = 0;
             loop {
-                match drain(&self.mft, self.provides, self.out_size) {
-                    Ok(v) => {
-                        let Some(s) = v.into_iter().last() else { return Ok(None) };
-                        let nv = sample_bytes(&s).map_err(|e| err("read picture", e))?;
-                        return Ok(Some(self.to_i420(&nv)));
+                match self.mft.ProcessInput(0, &s, 0) {
+                    Ok(()) => break,
+                    Err(e) if e.code() == MF_E_NOTACCEPTING && tries < 8 => {
+                        tries += 1;
+                        pics.extend(self.drain_pictures()?);
                     }
-                    Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE => self.pick_output()?,
-                    Err(e) => return Err(err("decode output", e)),
+                    Err(e) => return Err(err("decode", e)),
                 }
+            }
+            pics.extend(self.drain_pictures()?);
+            if pics.is_empty() {
+                // Still buffered: force it out. Drain keeps reference pictures, so decoding
+                // simply continues with the next sample.
+                self.mft.ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0).map_err(|e| err("drain", e))?;
+                pics.extend(self.drain_pictures()?);
+            }
+            Ok(pics.pop())
+        }
+    }
+
+    unsafe fn drain_pictures(&mut self) -> Result<Vec<I420>> {
+        loop {
+            match drain(&self.mft, self.provides, self.out_size) {
+                Ok(v) => {
+                    let mut out = Vec::with_capacity(v.len());
+                    for s in v {
+                        let nv = sample_bytes(&s).map_err(|e| err("read picture", e))?;
+                        out.push(self.to_i420(&nv));
+                    }
+                    return Ok(out);
+                }
+                Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE => self.pick_output()?,
+                Err(e) => return Err(err("decode output", e)),
             }
         }
     }
 
     fn to_i420(&self, nv: &[u8]) -> I420 {
-        let (w, h, st) = (self.width as usize, self.height as usize, (self.stride as usize).max(self.width as usize));
+        let (w, h) = (self.width as usize, self.height as usize);
+        let st = (self.stride as usize).max(w);
+        let rows = (self.buf_rows as usize).max(h);
         let mut f = I420::new(self.width & !1, self.height & !1);
-        let (cw, ch) = (w / 2, h / 2);
-        for r in 0..h.min(f.height as usize) {
-            f.y[r * w..r * w + w].copy_from_slice(&nv[r * st..r * st + w]);
+        let (fw, fh) = (f.width as usize, f.height as usize);
+        let (cw, ch) = (fw / 2, fh / 2);
+        if nv.len() < st * rows + st * (rows / 2) {
+            return f; // short buffer: hand back a blank picture rather than panic
         }
-        let uv = &nv[st * h..];
+        for r in 0..fh {
+            f.y[r * fw..r * fw + fw].copy_from_slice(&nv[r * st..r * st + fw]);
+        }
+        let uv = &nv[st * rows..];
         for r in 0..ch {
             for x in 0..cw {
                 f.u[r * cw + x] = uv[r * st + x * 2];
