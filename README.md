@@ -27,6 +27,7 @@
 </p>
 
 <p align="center">
+  <a href="#windows-edition-this-fork"><b>Windows edition</b></a> ·
   <a href="#screenshots">Screenshots</a> ·
   <a href="#what-it-does">Features</a> ·
   <a href="#install">Install</a> ·
@@ -44,6 +45,70 @@
 > affiliated with, endorsed by, or connected to Screen Studio or its makers in any
 > way. "Screen Studio" is a trademark of its respective owner. ScreenCraft contains no
 > code, artwork or other assets from that product.
+
+## Windows edition (this fork)
+
+This fork ([truevis/ScreenCraft](https://github.com/truevis/ScreenCraft), branch
+[`ci/windows-installer`](https://github.com/truevis/ScreenCraft/tree/ci/windows-installer)) focuses on
+making ScreenCraft solid on **Windows 10 / 11**, including laptops with Intel + NVIDIA graphics and
+high-DPI screens. Original project: [MarshallNickolauson/ScreenCraft](https://github.com/MarshallNickolauson/ScreenCraft).
+
+### What's new in this fork
+
+**Fixes**
+- Stopping a recording no longer gives a blank video and an error.
+- No console window behind the app.
+- The editor window fits on the screen it opens on (including 200% scaling).
+- The recorder bar starts centred and remembers its position across monitors.
+- No white or black overlay covering the screen while recording on hybrid Intel / NVIDIA laptops.
+- The recording border is a 2-pixel hairline on the very edges of the recorded screen, kept out of the video.
+- Microphone audio no longer crackles (capture timing jitter caused inserted silence and dropped samples).
+- Recording folders are named in local time, not UTC.
+- *Show in folder* after export opens the right folder.
+
+**Features**
+- **Projects menu:** New recording, Open project…, **Record more for this project**, and **Add a
+  recording or video to this project** (joined onto the end, existing edits kept).
+- **Save** button, and a **full-screen preview** (`F11`, `Esc` to leave).
+- Music **ripples** when a clip is trimmed or deleted.
+- Defaults tuned for **professional app demos**: edge-to-edge video on black, subtitle-style
+  captions, click ripple, 1.6× auto-zoom, on-screen shortcuts, music ducked under speech.
+- The built-in update check is removed.
+
+**Build tooling**
+- `scripts/build-windows.ps1` builds the app and the installer locally, with sccache and a `-Fast`
+  mode (about 20 s for a one-file change).
+- A GitHub Actions workflow (`build-windows.yml`) builds the same installer and runs the tests.
+
+### Install the Windows edition
+
+**Option 1: download the installer from GitHub Actions** (needs a GitHub account)
+1. Open [Actions → Build Windows installer](https://github.com/truevis/ScreenCraft/actions/workflows/build-windows.yml).
+2. Click the latest successful run and download the installer artifact at the bottom.
+3. Unzip it and run `screencraft_<version>.exe`. It installs per user to
+   `%LOCALAPPDATA%\Programs\ScreenCraft`; no admin rights needed. The installer is unsigned, so
+   SmartScreen may warn: **More info → Run anyway**.
+
+**Option 2: build it yourself**
+1. Install [Rust](https://rustup.rs) (MSVC toolchain) and the Visual Studio Build Tools with
+   *Desktop development with C++*, then:
+   ```powershell
+   winget install Kitware.CMake LLVM.LLVM NSIS.NSIS Mozilla.sccache
+   ```
+2. Clone and build:
+   ```powershell
+   git clone -b ci/windows-installer https://github.com/truevis/ScreenCraft.git
+   cd ScreenCraft
+   powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1
+   ```
+3. Run the `screencraft_<version>.exe` installer it creates in the repository folder.
+
+Recordings are saved in `Videos\ScreenCraft`, settings in `%APPDATA%\ScreenCraft`, and a log in
+`%LOCALAPPDATA%\ScreenCraft\screencraft.log`. Start and stop recording with **Ctrl+Shift+R**.
+
+**Tip:** for clean audio, turn off *Audio enhancements* for the microphone in Windows Sound settings,
+and avoid recording through a Bluetooth headset's microphone (it switches the headset to
+low-quality hands-free audio).
 
 ## Screenshots
 
