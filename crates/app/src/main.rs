@@ -1,3 +1,6 @@
+// A GUI app: no console window behind it in release builds.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 /// The app icon (the same artwork as the bundle's), so the Dock never shows a default one.
 fn icon() -> eframe::egui::IconData {
     let dec = png::Decoder::new(std::io::Cursor::new(include_bytes!("../icon.png").as_slice()));
@@ -26,6 +29,9 @@ fn main() -> eframe::Result {
             .with_always_on_top()
             .with_icon(icon()),
         renderer: eframe::Renderer::Wgpu,
+        // Keep eframe's default wgpu setup: the transparent overlay windows (recording border,
+        // area picker) need a backend with alpha compositing. Forcing DirectX 12 made them
+        // opaque black, covering the screen and recording black frames.
         ..Default::default()
     };
     eframe::run_native("ScreenCraft", options, Box::new(|cc| Ok(Box::new(screencraft::app::App::new(cc)))))
