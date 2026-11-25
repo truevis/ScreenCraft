@@ -1222,10 +1222,7 @@ impl EditorState {
                     self.dialogs.raw = !self.dialogs.raw;
                     self.dialogs.raw_anchor = Some(r.rect);
                 }
-                let upd = self.dialogs.update_available();
-                let label = if upd { "Update available" } else { "Updates" };
-                let col = if upd { Some(Color32::from_rgb(0x5f, 0xd3, 0x8d)) } else { None };
-                if kit::pill(ui, Some("info"), label, false, false, false, col).on_hover_text("About, privacy & updates").clicked() {
+                if kit::pill(ui, Some("info"), "About", false, false, false, None).on_hover_text("About & privacy").clicked() {
                     self.dialogs.about = true;
                 }
                 let can_redo = !self.redo.is_empty();

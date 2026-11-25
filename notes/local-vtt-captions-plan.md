@@ -57,6 +57,6 @@ If the dictation app is running, its model already uses about 3–4 GB of VRAM, 
 
 ## Risks
 
-- aifab-vtt is a separate local repo with no installer, so the feature only works where it's set up. Keep whisper.cpp as the fallback, and don't remove it. 
+- aifab-vtt is a separate local repo with no installer, so the feature only works where it's set up. Keep whisper.cpp as the fallback, and don't remove it. Have that configurable in the settings.
 - Python and CUDA cold start is about 5–15 s while the model loads. Show "Loading model…" until the first progress line.
 - Paths with spaces: pass arguments as a vector (`std::process::Command::arg`), never a joined string.

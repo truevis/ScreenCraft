@@ -21,9 +21,9 @@ pub struct Prefs {
     pub camera_id: Option<String>,
     pub camera_label: String,
     pub export_dir: Option<PathBuf>,
-    /// Notify-only update check at startup (default on).
-    pub update_check: Option<bool>,
-    pub dismissed_update: Option<String>,
+    /// Where the idle recorder bar was last left: its bottom-centre in desktop points.
+    /// `None` (first run) centres it on the main display.
+    pub bar_anchor: Option<[f32; 2]>,
 }
 
 impl Default for Prefs {
@@ -43,8 +43,7 @@ impl Default for Prefs {
             camera_id: None,
             camera_label: String::new(),
             export_dir: None,
-            update_check: None,
-            dismissed_update: None,
+            bar_anchor: None,
         }
     }
 }

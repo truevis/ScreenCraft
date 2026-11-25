@@ -17,4 +17,3 @@ pub mod recorder;
 pub mod srt;
 pub mod whisper;
 pub mod theme;
-pub mod updates;

@@ -1,14 +1,12 @@
-//! Popover menus (Presets, Raw files) and the About, privacy & updates window.
+//! Popover menus (Presets, Raw files) and the About & privacy window.
 
 use super::{open_url, EditorState};
 use crate::kit;
 use crate::theme::*;
-use crate::updates::{self, UpdateInfo};
 use eframe::egui::{self, Align2, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use screencraft_core::project::{CameraConfig, CursorConfig, Project, Styles};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
-use std::sync::mpsc::{channel, Receiver};
 
 pub struct Dialogs {
     pub about: bool,
@@ -21,14 +19,6 @@ pub struct Dialogs {
     pub presets_anchor: Option<Rect>,
     rename_buf: BTreeMap<String, String>,
     focus_name: Option<String>,
-    about_info: Option<UpdateInfo>,
-    checking: bool,
-    check_rx: Option<Receiver<UpdateInfo>>,
-    download_msg: Option<String>,
-    download_pct: Option<f32>,
-    download_rx: Option<Receiver<Result<std::path::PathBuf, String>>>,
-    pct_rx: Option<Receiver<f32>>,
-    asked: bool,
 }
 
 impl Default for Dialogs {
@@ -44,21 +34,7 @@ impl Default for Dialogs {
             presets_anchor: None,
             rename_buf: BTreeMap::new(),
             focus_name: None,
-            about_info: None,
-            checking: false,
-            check_rx: None,
-            download_msg: None,
-            download_pct: None,
-            download_rx: None,
-            pct_rx: None,
-            asked: false,
         }
-    }
-}
-
-impl Dialogs {
-    pub fn update_available(&self) -> bool {
-        updates::update_found().is_some()
     }
 }
 
@@ -490,46 +466,7 @@ fn small_btn(ui: &mut egui::Ui, text: &str, enabled: bool) -> bool {
 
 fn about(st: &mut EditorState, ctx: &egui::Context) {
     if !st.dialogs.about {
-        st.dialogs.asked = false;
         return;
-    }
-    let d = &mut st.dialogs;
-    // opening this window is itself a request to know, so look straight away
-    if updates::SUPPORTED && !d.asked {
-        d.asked = true;
-        d.checking = true;
-        let (tx, rx) = channel();
-        d.check_rx = Some(rx);
-        let c = ctx.clone();
-        std::thread::spawn(move || {
-            let _ = tx.send(updates::fetch());
-            c.request_repaint();
-        });
-    }
-    if let Some(rx) = &d.check_rx {
-        if let Ok(info) = rx.try_recv() {
-            if info.available {
-                updates::remember(&info);
-            }
-            d.about_info = Some(info);
-            d.checking = false;
-            d.check_rx = None;
-        }
-    }
-    if let Some(rx) = &d.pct_rx {
-        while let Ok(p) = rx.try_recv() {
-            d.download_pct = Some(p);
-        }
-    }
-    if let Some(rx) = &d.download_rx {
-        if let Ok(r) = rx.try_recv() {
-            d.download_msg = Some(match r {
-                Ok(p) => format!("Saved to {} and opened. Quit ScreenCraft, drag it onto Applications and replace the old copy, then start it again.", p.display()),
-                Err(e) => format!("The download did not finish ({e}). You can get it from the website instead."),
-            });
-            d.download_pct = None;
-            d.download_rx = None;
-        }
     }
     let mut open = true;
     let screen = ctx.content_rect();
@@ -541,11 +478,6 @@ fn about(st: &mut EditorState, ctx: &egui::Context) {
             open = false;
         }
     });
-    let info = d.about_info.clone();
-    let checking = d.checking;
-    let (mut recheck, mut do_download, mut later, mut toggle_check) = (false, false, false, false);
-    let dl_pct = d.download_pct;
-    let dl_msg = d.download_msg.clone();
     egui::Window::new("About ScreenCraft")
         .title_bar(false)
         .collapsible(false)
@@ -559,7 +491,7 @@ fn about(st: &mut EditorState, ctx: &egui::Context) {
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
                     ui.label(egui::RichText::new("ScreenCraft").size(22.0).color(TEXT));
-                    ui.label(egui::RichText::new(format!("Version {}", updates::VERSION)).size(12.0).color(MUTED));
+                    ui.label(egui::RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION"))).size(12.0).color(MUTED));
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
                     if kit::icon_btn(ui, "close", "Close").clicked() {
@@ -567,97 +499,19 @@ fn about(st: &mut EditorState, ctx: &egui::Context) {
                     }
                 });
             });
-            if updates::SUPPORTED {
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 6.0;
-                    h2(ui, "Updates");
-                    if let Some(i) = info.as_ref().filter(|i| i.available) {
-                        card(ui, true, |ui| {
-                            ui.label(egui::RichText::new(format!("ScreenCraft {} is available (you have {})", i.latest, i.current)).strong().size(13.0).color(TEXT));
-                            for n in &i.notes {
-                                para(ui, &format!("•  {n}"));
-                            }
-                            ui.add_space(4.0);
-                            let help = dl_msg.clone().unwrap_or_else(|| "Download saves the new version to your Downloads folder and opens it. ScreenCraft never installs anything by itself: you drag it across when you are ready.".into());
-                            ui.add(egui::Label::new(egui::RichText::new(help).size(13.0).color(MUTED)).wrap());
-                            ui.add_space(6.0);
-                            ui.horizontal(|ui| {
-                                let label = match dl_pct {
-                                    Some(p) => format!("Downloading {}%", p.round()),
-                                    None if dl_msg.is_some() && dl_msg.as_deref().map(|m| m.starts_with("Saved")).unwrap_or(false) => "Downloaded".into(),
-                                    None => "Download".to_string(),
-                                };
-                                if kit::primary(ui, None, &label).clicked() && dl_pct.is_none() {
-                                    do_download = true;
-                                }
-                                if small_btn(ui, "Later", true) {
-                                    later = true;
-                                }
-                            });
-                        });
-                    }
-                    card(ui, false, |ui| {
-                        ui.horizontal(|ui| {
-                            let text = match &info {
-                                _ if checking => "Checking…".to_string(),
-                                None => "Not checked yet.".into(),
-                                Some(i) if i.error.is_some() => "Could not check for updates. You are offline or the server is unreachable.".into(),
-                                Some(i) if i.available => format!("Version {} is available.", i.latest),
-                                Some(i) => format!("You have the latest version ({}).", i.current),
-                            };
-                            let col = if info.as_ref().map(|i| i.error.is_some()).unwrap_or(false) { Color32::from_rgb(0xff, 0x9a, 0xa6) } else { LABEL };
-                            ui.add(egui::Label::new(egui::RichText::new(text).size(13.0).color(col)).wrap());
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if small_btn(ui, "Check now", !checking) {
-                                    recheck = true;
-                                }
-                            });
-                        });
-                        ui.add_space(8.0);
-                        let mut on = updates::enabled();
-                        ui.horizontal(|ui| {
-                            ui.vertical(|ui| {
-                                // leave room for the switch on the right
-                                ui.set_max_width((ui.available_width() - 56.0).max(120.0));
-                                ui.spacing_mut().item_spacing.y = 2.0;
-                                para(ui, "Check for updates when ScreenCraft starts");
-                                ui.label(egui::RichText::new("Off means ScreenCraft never contacts the update server unless you press Check now.").size(12.0).color(MUTED));
-                            });
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                let (r, resp) = ui.allocate_exact_size(Vec2::new(38.0, 22.0), Sense::click());
-                                ui.painter().rect_filled(r, CornerRadius::same(11), if on { ACCENT } else { LINE_2 });
-                                let kx = r.min.x + 3.0 + if on { 16.0 } else { 0.0 };
-                                ui.painter().circle_filled(Pos2::new(kx + 8.0, r.center().y), 8.0, Color32::WHITE);
-                                if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                                    on = !on;
-                                    toggle_check = true;
-                                }
-                            });
-                        });
-                        if toggle_check {
-                            updates::set_enabled(on);
-                        }
-                    });
-                });
-            }
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 6.0;
                 h2(ui, "Privacy");
                 card(ui, false, |ui| {
                     ui.spacing_mut().item_spacing.y = 8.0;
-                    ui.add(egui::Label::new(egui::RichText::new("ScreenCraft works on your computer. Your recordings, screen, camera, microphone, cursor data and captions are never uploaded. There are no accounts, no analytics and no telemetry.").size(13.0).color(LABEL)).wrap());
-                    para(ui, if updates::SUPPORTED { "Two things use the network, and only these:" } else { "One thing uses the network, and only when you ask:" });
-                    if updates::SUPPORTED {
-                        para(ui, "•  Update check. At startup (you can turn it off above) ScreenCraft requests one small file from screencraft.mdnlabs.dev to see whether a newer version exists. The request contains the app version and nothing else about you. The site is served by Cloudflare, which, like any web host, sees the IP address of a request. If you press Download, ScreenCraft fetches the installer from the same site and saves it to your Downloads folder.");
-                    }
+                    ui.add(egui::Label::new(egui::RichText::new("ScreenCraft works on your computer. Your recordings, screen, camera, microphone, cursor data and captions are never uploaded. There are no accounts, no analytics, no telemetry and no update checks.").size(13.0).color(LABEL)).wrap());
+                    para(ui, "One thing uses the network, and only when you ask:");
                     para(ui, "•  Caption models. Only if you ask to generate captions, a speech model file is downloaded once from Hugging Face. Your audio is never sent anywhere; recognition runs on your machine.");
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing.x = 14.0;
                         for (t, u) in [
-                            ("Privacy policy", "https://screencraft.mdnlabs.dev/privacy"),
-                            ("What is stored and where", "https://screencraft.mdnlabs.dev/docs/privacy-and-data"),
-                            ("Third-party notices", "https://screencraft.mdnlabs.dev/third-party-notices"),
-                            ("Source code (MIT)", "https://github.com/MarshallNickolauson/ScreenCraft"),
+                            ("Third-party notices", "https://github.com/truevis/ScreenCraft/blob/ci/windows-installer/THIRD-PARTY-NOTICES.md"),
+                            ("Source code (MIT)", "https://github.com/truevis/ScreenCraft"),
                         ] {
                             if ui.add(egui::Label::new(egui::RichText::new(t).size(12.5).color(ACCENT_2)).sense(Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                                 let _ = open_url(u);
@@ -667,50 +521,6 @@ fn about(st: &mut EditorState, ctx: &egui::Context) {
                 });
             });
         });
-    let d = &mut st.dialogs;
-    if recheck {
-        d.checking = true;
-        let (tx, rx) = channel();
-        d.check_rx = Some(rx);
-        let c = ctx.clone();
-        std::thread::spawn(move || {
-            let _ = tx.send(updates::fetch());
-            c.request_repaint();
-        });
-    }
-    if later {
-        if let Some(i) = &d.about_info {
-            updates::dismiss(&i.latest);
-        }
-        if let Some(i) = d.about_info.as_mut() {
-            i.available = false;
-        }
-    }
-    if do_download {
-        if let Some(i) = d.about_info.clone() {
-            let (tx, rx) = channel();
-            let (ptx, prx) = channel();
-            d.download_rx = Some(rx);
-            d.pct_rx = Some(prx);
-            d.download_pct = Some(0.0);
-            let c = ctx.clone();
-            std::thread::spawn(move || {
-                let c2 = c.clone();
-                let r = updates::download(&i.download, &i.latest, &|p| {
-                    let _ = ptx.send(p);
-                    c2.request_repaint();
-                });
-                if r.is_err() {
-                    let _ = open_url(&i.page);
-                }
-                let _ = tx.send(r);
-                c.request_repaint();
-            });
-        }
-    }
-    if checking || d.download_rx.is_some() {
-        ctx.request_repaint_after(std::time::Duration::from_millis(120));
-    }
     if !open || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         st.dialogs.about = false;
     }

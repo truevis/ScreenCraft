@@ -10,7 +10,7 @@
 # Usage (from the repository root, in PowerShell):
 #   powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1
 #   powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -Out custom-name.exe
-# The installer is named after the version (0.4.0 -> screencraft_0_4_0.exe), like the macOS .dmg.
+# The installer is named after the version (0.4.1 -> screencraft_0_4_1.exe), like the macOS .dmg.
 param([string]$Out = "")
 
 $ErrorActionPreference = "Stop"

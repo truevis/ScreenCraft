@@ -14,7 +14,7 @@
   <img alt="Rust" src="https://img.shields.io/badge/core-Rust-b7410e?style=flat-square&logo=rust">
   <img alt="macOS · Windows · Linux" src="https://img.shields.io/badge/macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-native-0EA5C6?style=flat-square">
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-3a3a3a?style=flat-square">
-  <img alt="Version 0.4.0" src="https://img.shields.io/badge/version-0.4.0-5b6ee1?style=flat-square">
+  <img alt="Version 0.4.1" src="https://img.shields.io/badge/version-0.4.1-5b6ee1?style=flat-square">
   <img alt="Status: early alpha" src="https://img.shields.io/badge/status-early%20alpha-d69e2e?style=flat-square">
   <img alt="Pure Rust engines" src="https://img.shields.io/badge/engines-Rust%20%2B%20wgpu-2f9a72?style=flat-square">
 </p>
@@ -138,7 +138,7 @@ It installs per user into `%LOCALAPPDATA%\Programs\ScreenCraft`. Capture uses DX
 Duplication, system audio is a WASAPI loopback. The installer is unsigned, so SmartScreen may warn.
 
 Build it yourself with Rust (MSVC toolchain, *Desktop development with C++*), CMake, LLVM and NSIS;
-the installer is named after the version (`screencraft_0_4_0.exe`):
+the installer is named after the version (`screencraft_0_4_1.exe`):
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1
@@ -170,7 +170,7 @@ open ~/Applications/ScreenCraft.app
 
 Needs [Rust](https://rustup.rs), CMake and the Xcode command line tools. If `libvpx` is installed
 (`brew install libvpx`) the bundle is built with VP9 export. `./scripts/dmg.sh` also builds the
-installer, `screencraft_0_4_0.dmg` (named after the version, like the Windows installer).
+installer, `screencraft_0_4_1.dmg` (named after the version, like the Windows installer).
 
 ## Using it
 

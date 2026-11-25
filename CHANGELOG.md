@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.1
+
+- **Windows recordings finish.** Stopping no longer fails with "recorder stopped unexpectedly" and
+  a blank video: the encoder's real error is reported, and a partial recording stays playable.
+  The Windows decoder now returns every frame, so the editor previews recordings correctly.
+- **The recorder bar remembers where you put it**, on any monitor, and starts centred on the main
+  screen the first time (or when its monitor is gone).
+- **No update checks.** The update checker and its settings are removed; ScreenCraft only uses
+  the network to download a caption model when you ask for captions.
+- A log at `%LOCALAPPDATA%\ScreenCraft\screencraft.log` records recording results and crashes.
+
 ## Unreleased
 
 - **Jump cuts.** *Auto jump cuts* finds the pauses in your speech and switches those stretches off:

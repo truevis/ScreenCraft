@@ -81,7 +81,8 @@ jobs:
       - name: Write SHA256SUMS.txt
         shell: pwsh
         run: |
-          $exe = "screencraft_0_4_0.exe"
+          $ver = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          $exe = "screencraft_$($ver -replace '\.', '_').exe"
           if (-not (Test-Path $exe)) { throw "missing $exe" }
           $len = (Get-Item $exe).Length
           if ($len -le 0) { throw "installer is empty" }
@@ -95,6 +96,6 @@ jobs:
         with:
           name: screencraft-windows-installer
           path: |
-            screencraft_0_4_0.exe
+            screencraft_*.exe
             SHA256SUMS.txt
           if-no-files-found: error

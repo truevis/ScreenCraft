@@ -4283,7 +4283,7 @@ dependencies = [
 
 [[package]]
 name = "screencraft"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "base64",
  "cpal",
@@ -4309,7 +4309,7 @@ dependencies = [
 
 [[package]]
 name = "screencraft-audio"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "cpal",
  "symphonia",
@@ -4317,7 +4317,7 @@ dependencies = [
 
 [[package]]
 name = "screencraft-capture"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "ashpd",
  "core-foundation 0.10.1",
@@ -4338,7 +4338,7 @@ dependencies = [
 
 [[package]]
 name = "screencraft-core"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -4346,7 +4346,7 @@ dependencies = [
 
 [[package]]
 name = "screencraft-encode"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "audiopus",
  "env-libvpx-sys",
@@ -4357,7 +4357,7 @@ dependencies = [
 
 [[package]]
 name = "screencraft-engine"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "color_quant",
  "crossbeam-channel",
@@ -4373,7 +4373,7 @@ dependencies = [
 
 [[package]]
 name = "screencraft-render"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "base64",
  "bytemuck",

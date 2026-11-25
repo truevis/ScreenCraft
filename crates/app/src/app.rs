@@ -60,7 +60,6 @@ impl App {
         crate::theme::install(&cc.egui_ctx);
         let render_state = cc.wgpu_render_state.clone().expect("the wgpu renderer is required");
         let mut app = Self::build(&cc.egui_ctx, render_state, true);
-        crate::updates::startup_check(cc.egui_ctx.clone());
         app.show_permissions = cfg!(target_os = "macos") && !app.rec.permissions.screen;
         app
     }
@@ -373,6 +372,46 @@ impl App {
         }
     }
 
+    /// Where the idle bar of size `want` goes: back where the user last left it when that spot is
+    /// still on a connected display (monitors come and go), otherwise centred on the main display.
+    fn home_pos(&self, want: Vec2) -> Pos2 {
+        let displays = self.rec.displays();
+        let rect = |d: &screencraft_capture::DisplayInfo| egui::Rect::from_min_size(Pos2::new(d.x as f32, d.y as f32), Vec2::new(d.width as f32, d.height as f32));
+        if let Some([ax, ay]) = self.prefs.bar_anchor {
+            let a = Pos2::new(ax, ay - 1.0);
+            if let Some(r) = displays.iter().map(rect).find(|r| r.contains(a)) {
+                let x = (ax - want.x / 2.0).clamp(r.min.x, (r.max.x - want.x).max(r.min.x));
+                let y = (ay - want.y).clamp(r.min.y, (r.max.y - want.y).max(r.min.y));
+                return Pos2::new(x, y);
+            }
+        }
+        let r = displays.iter().find(|d| d.is_main).map(rect).unwrap_or(egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0)));
+        Pos2::new(r.center().x - want.x / 2.0, r.center().y - want.y / 2.0)
+    }
+
+    /// Remember where the user dragged the idle bar, so the next start puts it back there.
+    fn remember_bar(&mut self, ctx: &egui::Context) {
+        if self.rec.phase != Phase::Idle || !self.editors.is_empty() || self.rec.menu.is_some() {
+            return;
+        }
+        let Some((want, _, _)) = self.applied else { return };
+        let (outer, dragging) = ctx.input(|i| (i.viewport().outer_rect, i.pointer.any_down()));
+        let Some(o) = outer else { return };
+        // only a settled, full-size bar on a real display (not mid-resize, not parked off screen)
+        if dragging || (o.width() - want.x).abs() > 2.0 || (o.height() - want.y).abs() > 2.0 {
+            return;
+        }
+        let anchor = Pos2::new(o.center().x, o.max.y);
+        let on_screen = self.rec.displays().iter().any(|d| {
+            egui::Rect::from_min_size(Pos2::new(d.x as f32, d.y as f32), Vec2::new(d.width as f32, d.height as f32)).contains(Pos2::new(anchor.x, anchor.y - 1.0))
+        });
+        let moved = self.prefs.bar_anchor.map(|[x, y]| (x - anchor.x).abs() > 2.0 || (y - anchor.y).abs() > 2.0).unwrap_or(true);
+        if on_screen && moved {
+            self.prefs.bar_anchor = Some([anchor.x, anchor.y]);
+            self.prefs.save();
+        }
+    }
+
     /// Keep the bar's window the size the current phase wants, anchored at its bottom centre.
     fn place_bar(&mut self, ctx: &egui::Context) {
         let screen_w = self.rec.displays().iter().find(|d| d.is_main).map(|d| d.width as f32).unwrap_or(1440.0);
@@ -405,17 +444,11 @@ impl App {
                 let bottom = o.max.y;
                 Pos2::new(cx - want.x / 2.0, bottom - want.y)
             }
-            _ => {
-                let d = self.rec.displays().iter().find(|d| d.is_main).cloned();
-                let (dx, dy, dw, dh) = d.map(|d| (d.x as f32, d.y as f32, d.width as f32, d.height as f32)).unwrap_or((0.0, 0.0, 1440.0, 900.0));
-                Pos2::new(dx + (dw - want.x) / 2.0, dy + dh - want.y - 90.0)
-            }
+            _ => self.home_pos(want),
         };
         // after a recording the bar returns to its dock
         let pos = if docked && matches!(self.applied, Some((_, p, _)) if !matches!(p, Phase::Idle | Phase::Starting)) {
-            let d = self.rec.displays().iter().find(|d| d.is_main).cloned();
-            let (dx, dy, dw, dh) = d.map(|d| (d.x as f32, d.y as f32, d.width as f32, d.height as f32)).unwrap_or((0.0, 0.0, 1440.0, 900.0));
-            Pos2::new(dx + (dw - want.x) / 2.0, dy + dh - want.y - 90.0)
+            self.home_pos(want)
         } else {
             pos
         };
@@ -504,6 +537,7 @@ impl App {
         }
 
         self.place_bar(&ctx);
+        self.remember_bar(&ctx);
         let a = egui::CentralPanel::default().frame(egui::Frame::NONE).show_inside(ui, |ui| self.rec.show(ui, &mut self.prefs)).inner;
         self.handle_action(&ctx, a);
 
