@@ -9,7 +9,7 @@ use screencraft_encode::color::{default_threads, to_i420, PixelOrder};
 use screencraft_encode::mp4read::Mp4File;
 use screencraft_encode::{
     AudioConfig, Container, Effort, ExportSettings, ExportSummary, FileSink, HwPreference, ThreadedExporter, VideoCodec,
-    VideoConfig, I420,
+    VideoConfig,
 };
 use screencraft_render::{build_scene, build_scene_with, output_size, CamOverride, Compositor, Slot};
 use std::path::Path;

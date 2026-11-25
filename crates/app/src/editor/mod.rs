@@ -12,7 +12,7 @@ mod timeline;
 
 use crate::icons;
 use crate::kit;
-use crate::theme::{self, *};
+use crate::theme::*;
 use eframe::egui::{self, Align2, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use screencraft_core::input::InputLog;
 use screencraft_core::project::Project;
@@ -1432,8 +1432,6 @@ impl EditorState {
         // transport (46px + margins) at the bottom
         let tr_h = 46.0;
         let canvas = Rect::from_min_max(Pos2::new(inner.min.x, inner.min.y + 40.0), Pos2::new(inner.max.x, inner.max.y - tr_h - 18.0));
-        let ui_clip = ui.clip_rect();
-        let _ = ui_clip;
         self.show_preview(ui, canvas);
         self.transport(ui, Rect::from_min_max(Pos2::new(inner.min.x, inner.max.y - tr_h - 10.0), Pos2::new(inner.max.x, inner.max.y - 10.0)));
     }
@@ -1450,7 +1448,7 @@ impl EditorState {
         let t_cur = fmt_time(self.playhead_ms);
         ui.painter().text(Pos2::new(x + time_w / 2.0, cy), Align2::CENTER_CENTER, t_cur, kit::font(12.0), MUTED);
         x += time_w + 8.0;
-        let mut btn = |ui: &mut egui::Ui, x: &mut f32, w: f32, name: &str, tip: &str| -> bool {
+        let btn = |ui: &mut egui::Ui, x: &mut f32, w: f32, name: &str, tip: &str| -> bool {
             let r = Rect::from_min_size(Pos2::new(*x, cy - 16.0), Vec2::new(w, 32.0));
             *x += w + 8.0;
             let resp = ui.interact(r, ui.id().with(("tr", name)), Sense::click());

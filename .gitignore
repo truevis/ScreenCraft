@@ -8,3 +8,6 @@ website/public/downloads/
 website/public/latest.json
 .wrangler/
 artifacts/
+
+# local installers from scripts/build-windows.ps1
+/screencraft_*.exe

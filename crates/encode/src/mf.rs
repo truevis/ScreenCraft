@@ -11,7 +11,6 @@ use crate::{Error, Result};
 use std::collections::VecDeque;
 use std::mem::ManuallyDrop;
 use std::sync::OnceLock;
-use windows::core::Interface;
 use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED};
 

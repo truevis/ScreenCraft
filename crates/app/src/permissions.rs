@@ -16,14 +16,14 @@ pub fn show(ctx: &egui::Context, rec: &mut Recorder) -> bool {
     let p = rec.permissions;
     let builder = ViewportBuilder::default().with_title("ScreenCraft permissions").with_inner_size([600.0, 760.0]).with_resizable(false);
     ctx.show_viewport_immediate(ViewportId::from_hash_of("permissions"), builder, |ui, _| {
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin { left: 34, right: 34, top: 28, bottom: 24 })).show_inside(ui, |ui| {
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin { left: 34, right: 34, top: 28, bottom: 24 })).show(ui, |ui| {
             ui.spacing_mut().item_spacing = Vec2::new(8.0, 10.0);
             ui.label(egui::RichText::new("Let's set up permissions").size(21.0).color(TEXT));
-            ui.add(egui::Label::new(egui::RichText::new("ScreenCraft needs a couple of macOS permissions before it can record. Grant them below — this window checks automatically.").size(13.0).color(MUTED)).wrap());
+            ui.add(egui::Label::new(egui::RichText::new("ScreenCraft needs a couple of macOS permissions before it can record. Grant them below â€” this window checks automatically.").size(13.0).color(MUTED)).wrap());
             ui.add_space(4.0);
             let (line, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
             ui.painter().rect_filled(line, 0.0, LINE);
-            let mut perm = |ui: &mut egui::Ui, icon: &str, name: &str, required: bool, desc: &str, state: Option<bool>, button: &str| -> bool {
+            let perm = |ui: &mut egui::Ui, icon: &str, name: &str, required: bool, desc: &str, state: Option<bool>, button: &str| -> bool {
                 let (r, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 64.0), Sense::hover());
                 let edge = match state {
                     Some(true) => OK,
@@ -83,7 +83,7 @@ pub fn show(ctx: &egui::Context, rec: &mut Recorder) -> bool {
                 screencraft_capture::request_input_monitoring();
                 open_pane("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent");
             }
-            ui.add(egui::Label::new(egui::RichText::new("A permission was just enabled. macOS only applies Screen Recording and Input Monitoring after ScreenCraft restarts — quit and open it again to finish.").size(12.5).color(Color32::from_rgb(0xcf, 0xe3, 0xf7))).wrap());
+            ui.add(egui::Label::new(egui::RichText::new("A permission was just enabled. macOS only applies Screen Recording and Input Monitoring after ScreenCraft restarts â€” quit and open it again to finish.").size(12.5).color(Color32::from_rgb(0xcf, 0xe3, 0xf7))).wrap());
             ui.add_space(ui.available_height() - 52.0);
             ui.horizontal(|ui| {
                 if kit::pill(ui, None, "Check again", false, false, false, None).clicked() {

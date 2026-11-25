@@ -515,15 +515,6 @@ fn para(ui: &mut egui::Ui, text: &str) {
     ui.add(egui::Label::new(egui::RichText::new(text).size(13.0).color(LABEL)).wrap());
 }
 
-fn small_btn(ui: &mut egui::Ui, text: &str, enabled: bool) -> bool {
-    let tw = kit::text_width(ui, text, 13.0);
-    let (r, resp) = ui.allocate_exact_size(Vec2::new(tw + 26.0, 32.0), if enabled { Sense::click() } else { Sense::hover() });
-    ui.painter().rect_filled(r, CornerRadius::same(7), if resp.hovered() && enabled { RAISE } else { PANEL_2 });
-    ui.painter().rect_stroke(r, CornerRadius::same(7), Stroke::new(1.0, LINE_2), StrokeKind::Inside);
-    ui.painter().text(r.center(), Align2::CENTER_CENTER, text, kit::font(13.0), if enabled { Color32::from_rgb(0xe1, 0xe7, 0xf5) } else { alpha(MUTED, 0.7) });
-    enabled && resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
-}
-
 fn about(st: &mut EditorState, ctx: &egui::Context) {
     if !st.dialogs.about {
         return;

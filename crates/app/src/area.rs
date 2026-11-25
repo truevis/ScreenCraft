@@ -53,7 +53,7 @@ impl Picker {
             if let Some(inner) = ctx.input(|i| i.viewport().inner_rect) {
                 origin = (inner.min.x, inner.min.y);
             }
-            egui::CentralPanel::default().frame(egui::Frame::NONE).show_inside(ui, |ui| {
+            egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
                 let resp = ui.allocate_rect(full, egui::Sense::click_and_drag());
                 let painter = ui.painter();
                 if resp.drag_started() {
@@ -99,7 +99,7 @@ impl Picker {
                         for w in corners.windows(2) {
                             painter.extend(egui::Shape::dashed_line(&[w[0], w[1]], Stroke::new(2.0, ACCENT_2), 6.0, 4.0));
                         }
-                        let label = format!("{} × {}", sel.width().round(), sel.height().round());
+                        let label = format!("{} Ã— {}", sel.width().round(), sel.height().round());
                         let tw = kit::text_width(ui, &label, 12.0) + 16.0;
                         let lr = Rect::from_min_size(Pos2::new(sel.min.x, (sel.min.y - 26.0).max(2.0)), Vec2::new(tw, 22.0));
                         painter.rect_filled(lr, CornerRadius::same(4), ACCENT);
@@ -110,7 +110,7 @@ impl Picker {
                     }
                 }
                 // hint
-                let msg = if ratio.is_some() { "Drag to select a vertical (9:16) area · Esc to cancel" } else { "Drag to select the area to record · Esc to cancel" };
+                let msg = if ratio.is_some() { "Drag to select a vertical (9:16) area Â· Esc to cancel" } else { "Drag to select the area to record Â· Esc to cancel" };
                 let tw = kit::text_width(ui, msg, 12.0) + 28.0;
                 let hr = Rect::from_min_size(Pos2::new(full.center().x - tw / 2.0, full.min.y + 24.0), Vec2::new(tw, 34.0));
                 painter.rect_filled(hr, CornerRadius::same(8), PANEL);

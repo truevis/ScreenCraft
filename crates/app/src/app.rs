@@ -374,7 +374,7 @@ impl App {
         let cancel = job.cancel.clone();
         let builder = ViewportBuilder::default().with_title("Adding footage").with_inner_size([440.0, 150.0]).with_resizable(false);
         ctx.show_viewport_immediate(ViewportId::from_hash_of("sc-append-job"), builder, |ui, _| {
-            egui::CentralPanel::default().frame(egui::Frame::new().fill(crate::theme::BG).inner_margin(egui::Margin::same(20))).show_inside(ui, |ui| {
+            egui::CentralPanel::default().frame(egui::Frame::new().fill(crate::theme::BG).inner_margin(egui::Margin::same(20))).show(ui, |ui| {
                 ui.label(egui::RichText::new("Adding footage to the end of the project\u{2026}").size(14.0).color(Color32::WHITE));
                 ui.add_space(10.0);
                 ui.add(egui::ProgressBar::new(f).show_percentage());
@@ -708,7 +708,7 @@ impl App {
 
         self.place_bar(&ctx);
         self.remember_bar(&ctx);
-        let a = egui::CentralPanel::default().frame(egui::Frame::NONE).show_inside(ui, |ui| self.rec.show(ui, &mut self.prefs)).inner;
+        let a = egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.rec.show(ui, &mut self.prefs)).inner;
         self.handle_action(&ctx, a);
 
         // editors, one window each

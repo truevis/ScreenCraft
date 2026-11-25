@@ -4,7 +4,6 @@
 
 use super::ops::{self, slice_len};
 use super::{EditorState, Sel, Tab};
-use crate::icons;
 use crate::kit;
 use crate::theme::*;
 use eframe::egui::{self, Align2, Color32, CornerRadius, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Vec2};
@@ -79,8 +78,6 @@ struct Block {
     disabled: bool,
     pill: Option<String>,
     freeze: bool,
-    /// For clips: the slice index.
-    index: usize,
     /// Music: waveform and the clip's window into the file (in ms, duration ms, file ms).
     wave: Option<(Arc<Vec<f32>>, f64, f64, f64)>,
 }
@@ -179,11 +176,10 @@ fn tools(st: &mut EditorState, ui: &mut egui::Ui) {
                 if kit::icon_btn(ui, "zoom-plus", "Zoom timeline in").clicked() {
                     st.timeline.zoom = (st.timeline.zoom * 1.6).min(ZOOM_MAX);
                 }
-                let mut v = zoom_to_rng(st.timeline.zoom);
                 let (rect, resp) = ui.allocate_exact_size(Vec2::new(110.0, 18.0), Sense::click_and_drag());
                 if resp.dragged() || resp.clicked() {
                     if let Some(p) = resp.interact_pointer_pos() {
-                        v = (((p.x - rect.min.x - 7.0) / (rect.width() - 14.0)).clamp(0.0, 1.0) * 100.0) as f64;
+                        let v = (((p.x - rect.min.x - 7.0) / (rect.width() - 14.0)).clamp(0.0, 1.0) * 100.0) as f64;
                         st.timeline.zoom = rng_to_zoom(v);
                     }
                 }
@@ -241,7 +237,6 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
                 disabled: false,
                 pill: Some(format!("{} → {}", x_text(first.time_scale), x_text(last.time_scale))),
                 freeze: false,
-                index: si,
                 wave: None,
             });
             if si > 0 {
@@ -268,7 +263,6 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
             disabled: s.disabled,
             pill: if sped && !s.disabled { Some(x_text(s.time_scale)) } else { None },
             freeze: s.freeze,
-            index: si,
                 wave: None,
         });
         if si > 0 && !s.disabled && !slices[si - 1].disabled {
@@ -298,7 +292,6 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
                 disabled: z.is_disabled,
                 pill: None,
                 freeze: false,
-                index: 0,
                 wave: None,
             });
         }
@@ -323,7 +316,6 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
                 disabled: false,
                 pill: None,
                 freeze: false,
-                index: 0,
                 wave: None,
             });
         }
@@ -368,7 +360,6 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
             disabled: false,
             pill: None,
             freeze: false,
-            index: 0,
                 wave: None,
         });
     }
@@ -394,7 +385,6 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
                 disabled: false,
                 pill: None,
                 freeze: false,
-                index: 0,
                 wave: None,
             });
         }
@@ -415,7 +405,6 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
             disabled: false,
             pill: None,
             freeze: false,
-            index: 0,
             wave: st.peaks_for(&c.file, ui.ctx()).map(|p| (p, c.in_ms, c.dur_ms, c.file_dur_ms)),
         });
     }
@@ -446,7 +435,6 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
     }
     let zoom = st.timeline.zoom;
     let inner_w = tracks_w * zoom as f32;
-    let ppm = inner_w as f64 / total;
     let max_scroll = (inner_w - tracks_w).max(0.0);
     st.timeline.scroll_x = st.timeline.scroll_x.clamp(0.0, max_scroll);
 
@@ -470,8 +458,6 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
     }
     let zoom = st.timeline.zoom;
     let inner_w = tracks_w * zoom as f32;
-    let ppm = (inner_w as f64 / total).max(1e-6);
-    let _ = ppm;
     let ppm = inner_w as f64 / total;
     let scroll_x = st.timeline.scroll_x;
 
@@ -1175,5 +1161,4 @@ fn commit(st: &mut EditorState, kind: Kind, id: &str, mode: Mode, group: bool, a
         }
         Kind::Ramp => {}
     }
-    let _ = (icons::markup, Slice::default);
 }
