@@ -166,14 +166,6 @@ Build from source:
    repository folder. It installs per user to `%LOCALAPPDATA%\Programs\ScreenCraft` (pass `/S` for
    a silent install).
 
-> **Notes:**
-> - The installer is unsigned, so Windows SmartScreen may warn on first launch.
-> - On laptops with two graphics chips, the NVIDIA overlay may announce itself when ScreenCraft
->   starts; it isn't used and can be switched off in the NVIDIA app.
-> - For clean audio, turn off *Audio enhancements* for the microphone in Windows Sound settings, and
->   avoid recording through a Bluetooth headset's microphone (it switches the headset to low-quality
->   hands-free audio).
-
 ## Using it
 
 1. Pick **Display / Window / Area**, choose the camera and audio inputs, and press **Record** (or
@@ -240,6 +232,10 @@ python scripts\gen-notices.py           # refresh THIRD-PARTY-NOTICES.md after d
 Environment variables for testing: `SCREENCRAFT_RECORDINGS_DIR` (library folder),
 `SCREENCRAFT_OPEN` (open a package at start), `SCREENCRAFT_AUTORECORD=<seconds>` (record the main
 display, report, quit).
+
+## Credits
+
+AI-assisted coding by Claude, Cursor, and Antigravity.
 
 ## License
 
