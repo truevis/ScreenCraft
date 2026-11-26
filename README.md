@@ -67,7 +67,15 @@ Intel + NVIDIA graphics and high-DPI displays.
 **Features**
 - **Webcam-only recording (`Camera`):** record straight from a webcam (16:9 or `9:16` vertical) with a live draggable floating viewfinder above the bar, microphone capture, and automatic pause jump-cuts on open.
 - **Projects menu:** New recording, Open project…, **Record more for this project**, and **Add a
-  recording or video to this project** (joined onto the end, existing edits kept).
+  recording or video to this project** (existing edits kept).
+- **Timeline video management & instant multi-segment append:** `+ Add video` and `Record` buttons
+  in the timeline toolbar and a right-click clip context menu (insert/record before or after,
+  duplicate, delete). Footage is added as instant `Media.segments` without full re-encoding, and
+  auto-zooms are generated for newly added recordings.
+- **Arrow-key nudging:** `←` / `→` nudge selected captions, zooms, camera layouts, annotations, and
+  music clips on the timeline.
+- **Native export resolution:** Export defaults to the edited video's resolution, with a **Native**
+  option for non-standard dimensions.
 - **Discard** button in the editor top bar with a confirmation dialog to permanently delete the open
   recording and its saved project folder.
 - **Save** button, and a **full-screen preview** (`F11`, `Esc` to leave).
@@ -120,8 +128,11 @@ The recorder bar:
 
 **Projects** (the **Projects** menu in the editor, the folder button on the bar)
 - **New recording**, **Open project…** (any earlier recording), and the recent projects.
-- **Record more for this project** and **Add a recording or video to this project…**: the new
-  footage is joined onto the end as its own clip; zooms, captions and other edits stay where they are.
+- **Record more for this project** and **Add a recording or video to this project…**: append footage
+  or insert it before/after any clip via the **Projects** menu, the timeline toolbar (`+ Add video`,
+  `Record`), or a clip's right-click context menu, using instant multi-segment copying without full
+  re-encoding; zooms, captions and other edits stay where they are (and auto-zooms are generated
+  for newly added recordings).
 
 **Editing** (one window per project; a **Save** button, `Ctrl+S`, and unsaved edits are asked about before it closes)
 - **Timeline:** video, zoom, camera, notes (annotations), captions and music tracks. Trim, split,
@@ -160,7 +171,7 @@ corners and wallpapers are opt-in), with sentence-case subtitles on a dark box, 
 | WebM | AV1 (and VP9 when built with libvpx) | Opus |
 | GIF | 15 fps, up to 540 px | none |
 
-720p to 4K at 30 / 60 fps, four quality levels, optional motion blur and an optional **compress after
+Native (defaults to the edited video's resolution) or 720p to 4K at 30 / 60 fps, four quality levels, optional motion blur and an optional **compress after
 export** pass. A standalone **compressor** window re-encodes any H.264 MP4 smaller. Exports of the
 software codecs are deterministic. ScreenCraft bundles **no H.264 codec**; see [COMPLIANCE.md](COMPLIANCE.md).
 
@@ -227,7 +238,7 @@ Exposed tools:
 ### Shortcuts
 
 `Space` play / pause (hold for 2×) · `S` split · `Z` add a zoom · `Delete` / `Backspace` remove the selection ·
-`Ctrl+D` duplicate · `Q` / `E` start / end · `A` / `D` previous / next zoom · `←` `→` step a frame ·
+`Ctrl+D` duplicate · `Q` / `E` start / end · `A` / `D` previous / next zoom · `←` `→` step a frame (or nudge the selected timeline item) ·
 `Ctrl+Z` / `Ctrl+Shift+Z` (or `Ctrl+Y`) undo / redo · `Ctrl+S` save · `Ctrl+E` export ·
 `Ctrl+A` select all zooms · `F11` full-screen preview (`Esc` to leave) ·
 `Ctrl + scroll` zoom the timeline · `Ctrl+Shift+R` start / stop recording
@@ -292,8 +303,7 @@ components ScreenCraft uses, and [COMPLIANCE.md](COMPLIANCE.md) for the legal an
 
 ## Known limitations
 
-- Adding footage to a project re-encodes its whole video track; overlay camera bubble video from an added part is
-  not carried over.
+- Overlay camera bubble video from an added recording is not carried over.
 - HEVC export / compression is not built; the compressor reads H.264 MP4s and carries Opus audio only.
 - Large sources (5K+) decode slower than real time when scrubbing.
 - The installer is unsigned, so Windows SmartScreen may warn on first launch.
