@@ -136,15 +136,15 @@ struct CamDrag {
 /// Preview frame rate of the render track (editing); exports use their own.
 const TRACK_FPS: f64 = 60.0;
 
-/// What the Projects menu asks the app to do with the recorder.
+/// What the Projects menu or timeline asks the app to do with the recorder/footage.
 #[derive(Clone, Debug)]
 pub enum FootageRequest {
     /// Close this project and show the recorder bar for a new recording.
     NewRecording,
-    /// Close this project, record, and add that recording to the end of this project.
-    RecordMore,
-    /// Add an existing recording (`.screencraft` folder) or MP4 to the end of this project.
-    Add(std::path::PathBuf),
+    /// Close this project, record, and insert that recording into this project.
+    RecordMore { insert_at: Option<usize> },
+    /// Insert an existing recording (`.screencraft` folder) or MP4 into this project.
+    Add { path: std::path::PathBuf, insert_at: Option<usize> },
 }
 
 #[derive(Clone, Copy)]
@@ -261,8 +261,7 @@ impl EditorState {
     pub fn open(package: Package, ctx: &egui::Context, render_state: eframe::egui_wgpu::RenderState) -> Result<Self, String> {
         let mut project = package.load_project()?;
         let input = package.load_input(&project);
-        let screen = package.screen_path(&project);
-        let table = FrameTable::open(&screen)?;
+        let table = FrameTable::open_project(&package, &project)?;
         if project.scene.slices.is_empty() {
             project.scene.slices.push(screencraft_core::project::Slice {
                 id: "slice-0".into(),
@@ -274,36 +273,51 @@ impl EditorState {
         let worker = PreviewWorker::spawn(package.clone(), project.clone(), ctx.clone());
         let compositor = Compositor::new(&render_state.device, &render_state.queue);
 
-        // Waveform peaks, computed once in the background (combining system + mic when both exist).
+        // Waveform peaks, computed once in the background across all segments (combining system + mic).
         let (wtx, wrx) = std::sync::mpsc::channel();
         {
-            let (path, ctx) = (screen.clone(), ctx.clone());
-            let tracks: Vec<usize> = [project.media.system_track, project.media.mic_track]
+            let segs: Vec<_> = project
+                .media
+                .resolved_segments()
                 .into_iter()
-                .flatten()
-                .map(|t| t as usize)
+                .map(|s| {
+                    let tracks: Vec<usize> = [s.system_track, s.mic_track].into_iter().flatten().map(|t| t as usize).collect();
+                    (package.dir.join(&s.screen), s.duration_ms, tracks)
+                })
                 .collect();
+            let ctx = ctx.clone();
             std::thread::spawn(move || {
-                let mut combined: Vec<f32> = Vec::new();
-                for t in tracks {
-                    if let Ok(peaks) = waveform_peaks(&path, t) {
-                        if combined.is_empty() {
-                            combined = peaks;
-                        } else {
-                            let len = combined.len().max(peaks.len());
-                            combined.resize(len, 0.0);
-                            for (dst, &src) in combined.iter_mut().zip(&peaks) {
-                                *dst = dst.max(src);
+                let mut all_peaks: Vec<f32> = Vec::new();
+                let mut any_audio = false;
+                for (path, dur_ms, tracks) in segs {
+                    let expected = (dur_ms / 20.0).round() as usize;
+                    let mut seg_peaks: Vec<f32> = Vec::new();
+                    for t in tracks {
+                        if let Ok(peaks) = waveform_peaks(&path, t) {
+                            any_audio = true;
+                            if seg_peaks.is_empty() {
+                                seg_peaks = peaks;
+                            } else {
+                                let len = seg_peaks.len().max(peaks.len());
+                                seg_peaks.resize(len, 0.0);
+                                for (dst, &src) in seg_peaks.iter_mut().zip(&peaks) {
+                                    *dst = dst.max(src);
+                                }
                             }
                         }
                     }
+                    if expected > 0 {
+                        seg_peaks.resize(expected, 0.0);
+                    }
+                    all_peaks.extend(seg_peaks);
                 }
-                if !combined.is_empty() {
-                    let _ = wtx.send(combined);
+                if any_audio && !all_peaks.is_empty() {
+                    let _ = wtx.send(all_peaks);
                     ctx.request_repaint();
                 }
             });
         }
+        let export = ExportState::for_project(&project);
         let (ptx, prx) = std::sync::mpsc::channel();
         let mut s = Self {
             package,
@@ -338,7 +352,7 @@ impl EditorState {
             timeline: timeline::View::default(),
             waveform: None,
             wave_rx: Some(wrx),
-            export: ExportState::default(),
+            export,
             dirty_since: None,
             dirty: false,
             close_prompt: None,
@@ -1129,6 +1143,97 @@ impl EditorState {
         self.select(Sel::None);
     }
 
+    /// Default insertion slot in `project.scene.slices` for adding or recording a new video:
+    /// right after the currently selected clip, or at the end (`None`) when none is selected.
+    pub fn default_insert_index(&self) -> Option<usize> {
+        if let Sel::Slice(id) = &self.sel {
+            self.project.scene.slices.iter().position(|s| &s.id == id).map(|i| i + 1)
+        } else {
+            None
+        }
+    }
+
+    /// Select a slice by ID and move the playhead to its start in output time.
+    pub fn select_slice_and_seek(&mut self, slice_id: &str) {
+        let mut acc = 0.0;
+        for s in &self.project.scene.slices {
+            if s.id == slice_id {
+                self.select(Sel::Slice(slice_id.to_string()));
+                self.seek(acc);
+                return;
+            }
+            acc += ops::slice_len(s);
+        }
+    }
+
+    /// Nudge the currently selected timeline item(s) left/right by `delta_ms`.
+    /// Returns `true` if something was nudged (slices and empty selection return `false`).
+    pub fn nudge_selected(&mut self, delta_ms: f64) -> bool {
+        let shift_span = |s: &mut f64, e: &mut f64, dur: f64| {
+            let len = (*e - *s).max(0.0);
+            let ns = (*s + delta_ms).clamp(0.0, (dur - len).max(0.0));
+            *s = ns;
+            *e = ns + len;
+        };
+        match self.sel.clone() {
+            Sel::None | Sel::Slice(_) => return false,
+            Sel::Caption(_) => {
+                let ids = self.selected_caption_ids();
+                let dur = self.project.media.duration_ms;
+                self.edit_keyed(Some("nudge"), |p| {
+                    for c in p.scene.subtitles.iter_mut().filter(|c| ids.contains(&c.id)) {
+                        let old_s = c.source_start_ms;
+                        shift_span(&mut c.source_start_ms, &mut c.source_end_ms, dur);
+                        let actual = c.source_start_ms - old_s;
+                        for t in &mut c.word_starts {
+                            *t += actual;
+                        }
+                        for t in &mut c.word_ends {
+                            *t += actual;
+                        }
+                    }
+                });
+            }
+            Sel::Zoom(_) => {
+                let ids = self.selected_zoom_ids();
+                let dur = self.project.media.duration_ms;
+                self.edit_keyed(Some("nudge"), |p| {
+                    for z in p.scene.zooms.iter_mut().filter(|z| ids.contains(&z.id)) {
+                        shift_span(&mut z.source_start_ms, &mut z.source_end_ms, dur);
+                    }
+                });
+            }
+            Sel::Layout(_) => {
+                let ids = self.selected_layout_ids();
+                let dur = self.project.media.duration_ms;
+                self.edit_keyed(Some("nudge"), |p| {
+                    for l in p.scene.camera_layouts.iter_mut().filter(|l| ids.contains(&l.id)) {
+                        shift_span(&mut l.source_start_ms, &mut l.source_end_ms, dur);
+                    }
+                });
+            }
+            Sel::Annot(_) => {
+                let ids = self.selected_annot_ids();
+                let dur = self.project.media.duration_ms;
+                self.edit_keyed(Some("nudge"), |p| {
+                    for a in p.scene.annotations.iter_mut().filter(|a| ids.contains(&a.id)) {
+                        shift_span(&mut a.source_start_ms, &mut a.source_end_ms, dur);
+                    }
+                });
+            }
+            Sel::Music(_) => {
+                let ids = self.selected_music_ids();
+                let total = self.duration_ms();
+                self.edit_keyed(Some("nudge"), |p| {
+                    for c in p.scene.music_clips.iter_mut().filter(|c| ids.contains(&c.id)) {
+                        c.offset_ms = (c.offset_ms + delta_ms).clamp(0.0, (total - 200.0).max(0.0));
+                    }
+                });
+            }
+        }
+        true
+    }
+
     fn handle_keys(&mut self, ctx: &egui::Context) {
         if ctx.egui_wants_keyboard_input() || self.dialogs.discard || self.close_prompt.is_some() {
             return;
@@ -1225,13 +1330,18 @@ impl EditorState {
             }
         }
         let step = if shift { 1000.0 } else { 1000.0 / 30.0 };
+        let nudge_step = if shift { 1000.0 } else { 100.0 };
         if pressed(egui::Key::ArrowLeft) {
-            self.pause();
-            self.seek(self.playhead_ms - step);
+            if cmd || !self.nudge_selected(-nudge_step) {
+                self.pause();
+                self.seek(self.playhead_ms - step);
+            }
         }
         if pressed(egui::Key::ArrowRight) {
-            self.pause();
-            self.seek(self.playhead_ms + step);
+            if cmd || !self.nudge_selected(nudge_step) {
+                self.pause();
+                self.seek(self.playhead_ms + step);
+            }
         }
         if cmd && pressed(egui::Key::A) {
             self.select_all();
@@ -1491,7 +1601,7 @@ impl EditorState {
             .show_separator_line(true)
             .show(ui, |ui| {
                 self.tl_h = ui.max_rect().height();
-                timeline::show(self, ui);
+                timeline::show(self, ui, &prefs.recordings_dir);
             });
 
         egui::Panel::left("editor-side")

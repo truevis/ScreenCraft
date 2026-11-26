@@ -23,6 +23,24 @@ impl FrameTable {
         Ok(Self { pts_ms: t.samples.iter().map(|s| s.pts_us as f64 / 1000.0).collect(), width: t.width, height: t.height })
     }
 
+    pub fn open_project(package: &crate::Package, project: &screencraft_core::project::Project) -> Result<Self, String> {
+        let mut pts_ms = Vec::new();
+        let mut width = project.media.width;
+        let mut height = project.media.height;
+        for (idx, seg) in project.media.resolved_segments().iter().enumerate() {
+            let file = Mp4File::open(&package.dir.join(&seg.screen)).map_err(|e| e.to_string())?;
+            let t = file.video().ok_or("the file has no video track")?;
+            if idx == 0 && (width == 0 || height == 0) {
+                width = t.width;
+                height = t.height;
+            }
+            for s in &t.samples {
+                pts_ms.push(seg.offset_ms + s.pts_us as f64 / 1000.0);
+            }
+        }
+        Ok(Self { pts_ms, width, height })
+    }
+
     pub fn len(&self) -> usize {
         self.pts_ms.len()
     }
@@ -286,22 +304,49 @@ pub struct Frames {
     pub camera2: Option<Arc<I420>>,
 }
 
+struct VideoSegment {
+    path: std::path::PathBuf,
+    offset_ms: f64,
+    duration_ms: f64,
+    primary: Option<VideoSource>,
+    secondary: Option<VideoSource>,
+}
+
 /// The screen recording and (when there is one) the camera recording, decoded on demand. A second
 /// decoder for each is opened only while a cross-dissolve needs the other clip's picture.
 pub struct MultiSource {
-    screen: VideoSource,
-    screen2: Option<VideoSource>,
+    segments: Vec<VideoSegment>,
+    target_size: (u32, u32),
     camera: Option<VideoSource>,
     camera2: Option<VideoSource>,
-    screen_path: std::path::PathBuf,
     camera_path: Option<std::path::PathBuf>,
     camera_offset_ms: f64,
 }
 
 impl MultiSource {
     pub fn open(package: &crate::Package, project: &screencraft_core::project::Project) -> Result<Self, String> {
-        let screen_path = package.screen_path(project);
-        let screen = VideoSource::open(&screen_path)?;
+        let resolved = project.media.resolved_segments();
+        let mut segments: Vec<VideoSegment> = Vec::with_capacity(resolved.len());
+        for (i, seg) in resolved.into_iter().enumerate() {
+            let path = package.dir.join(&seg.screen);
+            let primary = if i == 0 { Some(VideoSource::open(&path)?) } else { None };
+            segments.push(VideoSegment {
+                path,
+                offset_ms: seg.offset_ms,
+                duration_ms: seg.duration_ms,
+                primary,
+                secondary: None,
+            });
+        }
+        let (w0, h0) = segments
+            .first()
+            .and_then(|s| s.primary.as_ref())
+            .map(|v| (v.width, v.height))
+            .unwrap_or((project.media.width, project.media.height));
+        let target_size = (
+            (if project.media.width > 0 { project.media.width } else { w0 }) & !1,
+            (if project.media.height > 0 { project.media.height } else { h0 }) & !1,
+        );
         let camera_path = project.media.camera.as_ref().map(|c| package.dir.join(c)).filter(|p| p.exists());
         // A camera file that cannot be decoded (an unsupported codec) just leaves the camera out.
         let camera = camera_path.as_ref().and_then(|p| match VideoSource::open(p) {
@@ -311,30 +356,71 @@ impl MultiSource {
                 None
             }
         });
-        Ok(Self { screen, screen2: None, camera, camera2: None, screen_path, camera_path, camera_offset_ms: project.media.camera_offset_ms })
+        Ok(Self {
+            segments,
+            target_size,
+            camera,
+            camera2: None,
+            camera_path,
+            camera_offset_ms: project.media.camera_offset_ms,
+        })
     }
 
     pub fn has_camera(&self) -> bool {
         self.camera.is_some()
     }
 
+    fn find_segment_index(&self, t_src: f64) -> usize {
+        if self.segments.len() <= 1 {
+            return 0;
+        }
+        for (i, seg) in self.segments.iter().enumerate() {
+            if t_src < seg.offset_ms + seg.duration_ms || i + 1 == self.segments.len() {
+                return i;
+            }
+        }
+        self.segments.len().saturating_sub(1)
+    }
+
+    fn fetch_screen(&mut self, t_src: f64, secondary: bool) -> Result<Arc<I420>, String> {
+        let idx = self.find_segment_index(t_src);
+        let seg = &mut self.segments[idx];
+        let local_t = (t_src - seg.offset_ms).max(0.0);
+        let slot = if secondary { &mut seg.secondary } else { &mut seg.primary };
+        if slot.is_none() {
+            *slot = Some(VideoSource::open(&seg.path)?);
+        }
+        let pic = slot.as_mut().unwrap().frame_at(local_t)?;
+        let (tw, th) = self.target_size;
+        if tw > 0 && th > 0 && (pic.width, pic.height) != (tw, th) {
+            Ok(Arc::new(crate::append::fit(&pic, tw, th)))
+        } else {
+            Ok(pic)
+        }
+    }
+
     /// Source-frame indexes of the screen and camera for a source time (for change detection).
     pub fn indexes(&self, t_src: f64) -> (usize, Option<usize>) {
-        (self.screen.index_at(t_src), self.camera.as_ref().map(|c| c.index_at(t_src + self.camera_offset_ms)))
+        let idx = self.find_segment_index(t_src);
+        let seg = &self.segments[idx];
+        let local_idx = seg
+            .primary
+            .as_ref()
+            .map(|v| v.index_at((t_src - seg.offset_ms).max(0.0)))
+            .unwrap_or_else(|| ((t_src - seg.offset_ms).max(0.0) * 0.06) as usize);
+        let global_idx = (idx << 24) | local_idx;
+        (global_idx, self.camera.as_ref().map(|c| c.index_at(t_src + self.camera_offset_ms)))
     }
 
     pub fn fetch(&mut self, t_src: f64, other_t: Option<f64>) -> Result<Frames, String> {
-        let screen = self.screen.frame_at(t_src)?;
+        let screen = self.fetch_screen(t_src, false)?;
         let camera = match self.camera.as_mut() {
             Some(c) => c.frame_at(t_src + self.camera_offset_ms).ok(),
             None => None,
         };
         let (mut screen2, mut camera2) = (None, None);
         if let Some(t2) = other_t {
-            if self.screen2.is_none() {
-                self.screen2 = VideoSource::open(&self.screen_path).ok();
-            }
-            screen2 = self.screen2.as_mut().and_then(|s| s.frame_at(t2).ok());
+            screen2 = self.fetch_screen(t2, true).ok();
             if self.camera.is_some() {
                 if self.camera2.is_none() {
                     self.camera2 = self.camera_path.as_ref().and_then(|p| VideoSource::open(p).ok());
@@ -343,5 +429,90 @@ impl MultiSource {
             }
         }
         Ok(Frames { screen, screen2, camera, camera2 })
+    }
+}
+
+struct AudioSeg {
+    path: std::path::PathBuf,
+    track: Option<usize>,
+    offset_ms: f64,
+    duration_ms: f64,
+    src: Option<AudioSource>,
+}
+
+/// Multi-segment 48 kHz stereo Opus audio source spanning `project.media.segments`.
+pub struct SegmentedAudioSource {
+    segments: Vec<AudioSeg>,
+    pub duration_ms: f64,
+}
+
+impl SegmentedAudioSource {
+    fn open_kind(package: &crate::Package, project: &screencraft_core::project::Project, mic: bool) -> Option<Self> {
+        let resolved = project.media.resolved_segments();
+        let mut any = false;
+        let mut segments = Vec::with_capacity(resolved.len());
+        let mut max_end = project.media.duration_ms;
+        for seg in resolved {
+            let track = if mic { seg.mic_track } else { seg.system_track }.map(|t| t as usize);
+            if track.is_some() {
+                any = true;
+            }
+            max_end = max_end.max(seg.offset_ms + seg.duration_ms);
+            segments.push(AudioSeg {
+                path: package.dir.join(&seg.screen),
+                track,
+                offset_ms: seg.offset_ms,
+                duration_ms: seg.duration_ms,
+                src: None,
+            });
+        }
+        if !any {
+            return None;
+        }
+        Some(Self { segments, duration_ms: max_end })
+    }
+
+    pub fn open_system(package: &crate::Package, project: &screencraft_core::project::Project) -> Option<Self> {
+        Self::open_kind(package, project, false)
+    }
+
+    pub fn open_mic(package: &crate::Package, project: &screencraft_core::project::Project) -> Option<Self> {
+        Self::open_kind(package, project, true)
+    }
+
+    pub fn read(&mut self, start_ms: f64, len_frames: usize) -> Result<Vec<f32>, String> {
+        let mut out = vec![0f32; len_frames * 2];
+        let req_end_ms = start_ms + (len_frames as f64 / 48.0);
+        for seg in &mut self.segments {
+            let Some(track) = seg.track else { continue };
+            let seg_end = seg.offset_ms + seg.duration_ms;
+            if seg_end <= start_ms || seg.offset_ms >= req_end_ms {
+                continue;
+            }
+            if seg.src.is_none() {
+                let file = Arc::new(Mp4File::open(&seg.path).map_err(|e| e.to_string())?);
+                seg.src = AudioSource::open(file, track).ok();
+            }
+            let Some(src) = seg.src.as_mut() else { continue };
+            let ov_start = start_ms.max(seg.offset_ms);
+            let ov_end = req_end_ms.min(seg_end);
+            let dst_off = ((ov_start - start_ms) * 48.0).round() as usize;
+            let n_frames = ((ov_end - ov_start) * 48.0).round() as usize;
+            let count = n_frames.min(len_frames.saturating_sub(dst_off));
+            if count == 0 {
+                continue;
+            }
+            if let Ok(pcm) = src.read((ov_start - seg.offset_ms).max(0.0), count) {
+                let n = (count * 2).min(pcm.len()).min(out.len().saturating_sub(dst_off * 2));
+                out[dst_off * 2..dst_off * 2 + n].copy_from_slice(&pcm[..n]);
+            }
+        }
+        Ok(out)
+    }
+}
+
+impl crate::audio_mix::PcmSource for SegmentedAudioSource {
+    fn read(&mut self, start_ms: f64, frames: usize) -> Vec<f32> {
+        SegmentedAudioSource::read(self, start_ms, frames).unwrap_or_else(|_| vec![0.0; frames * 2])
     }
 }

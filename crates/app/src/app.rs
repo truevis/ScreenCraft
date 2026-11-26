@@ -48,18 +48,29 @@ pub struct App {
     discard_after_stop: bool,
     /// Native window handle (Windows), to keep the recording bar out of the capture.
     native_window: Option<isize>,
-    /// "Record more for this project": the next recording is added to the end of this project.
-    append_target: Option<(std::path::PathBuf, String)>,
+    /// "Record more for this project": the next recording is inserted into this project.
+    append_target: Option<AppendTarget>,
     /// Footage being added to a project (runs on its own thread).
     append_job: Option<AppendJob>,
+    /// Newly added slice to select and seek to once the project reopens.
+    pending_select_slice: Option<(std::path::PathBuf, String)>,
     /// Floating camera viewfinder dismissed by user until re-selecting Camera mode.
     cam_preview_hidden: bool,
     cam_preview_anchor: Option<Pos2>,
 }
 
-/// Joining a recording or video onto the end of a project, off the UI thread.
+#[derive(Clone)]
+struct AppendTarget {
+    dir: std::path::PathBuf,
+    name: String,
+    insert_at: Option<usize>,
+    pos_label: String,
+}
+
+/// Joining a recording or video into a project, off the UI thread.
 struct AppendJob {
     target: std::path::PathBuf,
+    pos_label: String,
     /// A recording made just for this (removed once it is in the project).
     temp: Option<std::path::PathBuf>,
     progress: Arc<std::sync::atomic::AtomicU32>,
@@ -68,20 +79,20 @@ struct AppendJob {
 }
 
 impl AppendJob {
-    fn start(target: std::path::PathBuf, extra: std::path::PathBuf, temp: bool) -> Self {
+    fn start(target: std::path::PathBuf, extra: std::path::PathBuf, insert_at: Option<usize>, pos_label: String, temp: bool) -> Self {
         use std::sync::atomic::Ordering;
         let progress = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let result = Arc::new(std::sync::Mutex::new(None));
         let (p, c, r, t, e) = (progress.clone(), cancel.clone(), result.clone(), target.clone(), extra.clone());
         std::thread::spawn(move || {
-            let res = screencraft_engine::append::append(&t, &e, |f| {
+            let res = screencraft_engine::append::append_at(&t, &e, insert_at, |f| {
                 p.store((f * 1000.0) as u32, Ordering::Relaxed);
                 !c.load(Ordering::Relaxed)
             });
             *r.lock().unwrap() = Some(res);
         });
-        Self { target, temp: temp.then_some(extra), progress, cancel, result }
+        Self { target, pos_label, temp: temp.then_some(extra), progress, cancel, result }
     }
 }
 
@@ -128,6 +139,13 @@ impl App {
                     }
                 }
                 self.next_editor += 1;
+                if let Some((target_dir, slice_id)) = self.pending_select_slice.take() {
+                    if target_dir == ed.package.dir {
+                        ed.select_slice_and_seek(&slice_id);
+                    } else {
+                        self.pending_select_slice = Some((target_dir, slice_id));
+                    }
+                }
                 let title = ed.project.name.clone();
                 self.editors.push(EditorWin { id: ViewportId::from_hash_of(("editor", self.next_editor)), ed: Box::new(ed), title });
             }
@@ -235,6 +253,7 @@ impl App {
             pending_open: Vec::new(),
             append_target: None,
             append_job: None,
+            pending_select_slice: None,
             cam_preview_hidden: false,
             cam_preview_anchor: None,
             fresh: Vec::new(),
@@ -345,7 +364,7 @@ impl App {
     /// while footage is being added.
     fn draw_append(&mut self, ctx: &egui::Context) {
         use std::sync::atomic::Ordering;
-        if let Some((target, name)) = self.append_target.clone() {
+        if let Some(target) = self.append_target.clone() {
             let active = matches!(self.rec.phase, Phase::Idle | Phase::Starting | Phase::Countdown | Phase::Recording | Phase::Confirm);
             if let (true, true, Some(o)) = (self.editors.is_empty(), active, ctx.input(|i| i.viewport().outer_rect)) {
                 let size = Vec2::new(o.width().max(380.0), 34.0);
@@ -365,7 +384,7 @@ impl App {
                     ui.painter().text(
                         Pos2::new(inner.min.x + 6.0, inner.center().y),
                         egui::Align2::LEFT_CENTER,
-                        format!("Recording more for \u{201c}{name}\u{201d}: it goes at the end"),
+                        format!("Recording more for \u{201c}{}\u{201d}: goes {}", target.name, target.pos_label),
                         crate::kit::font(13.0),
                         Color32::WHITE,
                     );
@@ -379,7 +398,7 @@ impl App {
                     // back to the project; a recording already running is kept as its own project
                     self.append_target = None;
                     if self.rec.phase == Phase::Idle {
-                        self.pending_open.push(target);
+                        self.pending_open.push(target.dir);
                     }
                 }
             }
@@ -390,10 +409,13 @@ impl App {
             let job = self.append_job.take().unwrap();
             match res {
                 Ok(a) => {
-                    let _ = std::fs::remove_file(&a.old_screen);
+                    if !a.old_screen.as_os_str().is_empty() {
+                        let _ = std::fs::remove_file(&a.old_screen);
+                    }
                     if let Some(t) = &job.temp {
                         let _ = std::fs::remove_dir_all(t);
                     }
+                    self.pending_select_slice = Some((job.target.clone(), a.slice_id));
                     crate::applog::line(&format!("added {:.1} s to {}", a.added_ms / 1000.0, job.target.display()));
                 }
                 Err(e) => {
@@ -408,11 +430,12 @@ impl App {
             return;
         }
         let f = job.progress.load(Ordering::Relaxed) as f32 / 1000.0;
+        let pos_label = job.pos_label.clone();
         let cancel = job.cancel.clone();
         let builder = ViewportBuilder::default().with_title("Adding footage").with_inner_size([440.0, 150.0]).with_resizable(false);
         ctx.show_viewport_immediate(ViewportId::from_hash_of("sc-append-job"), builder, |ui, _| {
             egui::CentralPanel::default().frame(egui::Frame::new().fill(crate::theme::BG).inner_margin(egui::Margin::same(20))).show(ui, |ui| {
-                ui.label(egui::RichText::new("Adding footage to the end of the project\u{2026}").size(14.0).color(Color32::WHITE));
+                ui.label(egui::RichText::new(format!("Adding footage to the project ({pos_label})\u{2026}")).size(14.0).color(Color32::WHITE));
                 ui.add_space(10.0);
                 ui.add(egui::ProgressBar::new(f).show_percentage());
                 ui.add_space(10.0);
@@ -483,7 +506,7 @@ impl App {
                             let _ = std::fs::remove_dir_all(&f.package.dir);
                         }
                         Ok(f) => match self.append_target.take() {
-                            Some((target, _)) => self.append_job = Some(AppendJob::start(target, f.package.dir.clone(), true)),
+                            Some(target) => self.append_job = Some(AppendJob::start(target.dir, f.package.dir.clone(), target.insert_at, target.pos_label, true)),
                             None => {
                                 self.fresh.push(f.package.dir.clone());
                                 self.pending_open.push(f.package.dir.clone());
@@ -985,10 +1008,25 @@ impl App {
                 use crate::editor::FootageRequest;
                 let dir = self.editors[i].ed.package.dir.clone();
                 let name = self.editors[i].ed.project.name.clone();
+                let slices_len = self.editors[i].ed.project.scene.slices.len();
+                let format_pos = |insert_at: Option<usize>| -> String {
+                    match insert_at {
+                        None => "at the end".into(),
+                        Some(0) => "at the start".into(),
+                        Some(idx) if idx >= slices_len => "at the end".into(),
+                        Some(idx) => format!("after clip {idx}"),
+                    }
+                };
+                self.editors[i].ed.pause();
+                self.editors[i].ed.save_now();
                 match req {
                     FootageRequest::NewRecording => self.append_target = None,
-                    FootageRequest::RecordMore => self.append_target = Some((dir, name)),
-                    FootageRequest::Add(p) => self.append_job = Some(AppendJob::start(dir, p, false)),
+                    FootageRequest::RecordMore { insert_at } => {
+                        self.append_target = Some(AppendTarget { dir, name, insert_at, pos_label: format_pos(insert_at) });
+                    }
+                    FootageRequest::Add { path, insert_at } => {
+                        self.append_job = Some(AppendJob::start(dir, path, insert_at, format_pos(insert_at), false));
+                    }
                 }
                 close = true;
             }
@@ -1030,7 +1068,7 @@ impl App {
                 w.ed.export.cancel();
                 drop(w);
                 self.fresh.retain(|d| *d != dir);
-                if self.append_target.as_ref().is_some_and(|(d, _)| *d == dir) {
+                if self.append_target.as_ref().is_some_and(|t| t.dir == dir) {
                     self.append_target = None;
                 }
                 if let Err(e) = remove_package_dir(&dir) {

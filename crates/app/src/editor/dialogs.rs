@@ -159,13 +159,14 @@ fn projects_menu(st: &mut EditorState, ctx: &egui::Context, prefs: &crate::prefs
     let mut reveal_root = false;
     let mut footage: Option<super::FootageRequest> = None;
     let (mut pick_open, mut pick_add) = (false, false);
+    let default_idx = st.default_insert_index();
     let outside = popover(ctx, "projects-menu", anchor, true, 260.0, 320.0, |m| {
         m.header("Record");
         if m.item("New recording") {
             footage = Some(super::FootageRequest::NewRecording);
         }
         if m.item("Record more for this project") {
-            footage = Some(super::FootageRequest::RecordMore);
+            footage = Some(super::FootageRequest::RecordMore { insert_at: default_idx });
         }
         if m.item("Add a recording or video to this project…") {
             pick_add = true;
@@ -202,7 +203,7 @@ fn projects_menu(st: &mut EditorState, ctx: &egui::Context, prefs: &crate::prefs
     } else if pick_add {
         st.dialogs.projects = false;
         if let Some(p) = pick_footage(&root) {
-            st.footage_request = Some(super::FootageRequest::Add(p));
+            st.footage_request = Some(super::FootageRequest::Add { path: p, insert_at: default_idx });
         }
     } else if let Some(d) = open {
         st.dialogs.projects = false;
@@ -514,7 +515,7 @@ fn about(st: &mut EditorState, ctx: &egui::Context) {
                 ui.spacing_mut().item_spacing.y = 4.0;
                 for (keys, desc) in [
                     ("Space (tap / hold)", "Play / pause (hold for 2× speed)"),
-                    ("← / → (Shift)", "Step 1 frame (or 1 s)"),
+                    ("← / → (Shift)", "Step 1 frame / 1 s (or nudge selected item)"),
                     ("Q / E  ·  A / D", "Start / end  ·  Previous / next zoom"),
                     ("S / X / Z", "Split at playhead / toggle jump cut / add zoom"),
                     ("Ctrl+D / Del", "Duplicate / delete selected item"),

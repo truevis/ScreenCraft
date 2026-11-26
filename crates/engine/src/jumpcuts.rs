@@ -2,26 +2,21 @@
 
 use crate::export::decode_music;
 use crate::package::Package;
-use crate::source::AudioSource;
+use crate::source::SegmentedAudioSource;
 use screencraft_core::project::Project;
-use screencraft_encode::mp4read::Mp4File;
-use std::sync::Arc;
 
 /// Length of one level frame.
 pub const FRAME_MS: f64 = 20.0;
 const RATE: f64 = 48_000.0;
 
 /// Loudness of the speech track in dBFS, one value per [`FRAME_MS`] from source time 0. Uses the
-/// microphone (a track of `screen.mp4`, or a 0.3 recording's own file); a recording without a
+/// microphone (across all segments, or a 0.3 recording's own file); a recording without a
 /// microphone falls back to the system audio.
 pub fn audio_levels(package: &Package, project: &Project) -> Result<Vec<f32>, String> {
     let win = (RATE * FRAME_MS / 1000.0) as usize;
     let to_db = |sum: f32| 20.0 * (sum / win as f32).sqrt().max(1e-6).log10();
     let m = &project.media;
-    if let Some(t) = m.mic_track.or(m.system_track) {
-        let path = package.screen_path(project);
-        let file = Arc::new(Mp4File::open(&path).map_err(|e| e.to_string())?);
-        let mut src = AudioSource::open(file, t as usize)?;
+    if let Some(mut src) = SegmentedAudioSource::open_mic(package, project).or_else(|| SegmentedAudioSource::open_system(package, project)) {
         let total = src.duration_ms.min(m.duration_ms.max(1.0) + 1000.0);
         let mut out: Vec<f32> = Vec::new();
         let mut t = 0.0;

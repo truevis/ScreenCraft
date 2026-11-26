@@ -91,6 +91,14 @@ impl Default for ExportState {
 }
 
 impl ExportState {
+    pub fn for_project(project: &screencraft_core::project::Project) -> Self {
+        let native = project.media.width.min(project.media.height);
+        Self {
+            resolution: if native >= 144 { native } else { 1080 },
+            ..Self::default()
+        }
+    }
+
     pub fn poll(&mut self, ctx: &egui::Context) {
         if let Some(job) = &self.job {
             let done = job.result.lock().unwrap().take();
@@ -226,12 +234,18 @@ pub fn show(st: &mut EditorState, ctx: &egui::Context, prefs: &mut crate::prefs:
                 return;
             }
 
+            let native = st.project.media.width.min(st.project.media.height);
             let ex = &mut st.export;
             row(ui, "Format", None, |ui| {
                 kit::segmented(ui, None, &[(Format::Mp4, "MP4"), (Format::Gif, "GIF"), (Format::WebM, "WebM")], &mut ex.format);
             });
             row(ui, "Resolution", None, |ui| {
-                kit::segmented(ui, None, &[(720u32, "720p"), (1080, "1080p"), (1440, "1440p"), (2160, "4K")], &mut ex.resolution);
+                let mut opts: Vec<(u32, &str)> = Vec::with_capacity(5);
+                if native >= 144 && ![720, 1080, 1440, 2160].contains(&native) {
+                    opts.push((native, "Native"));
+                }
+                opts.extend([(720u32, "720p"), (1080, "1080p"), (1440, "1440p"), (2160, "4K")]);
+                kit::segmented(ui, None, &opts, &mut ex.resolution);
             });
             if ex.format != Format::Gif {
                 row(ui, "Frame rate", None, |ui| {

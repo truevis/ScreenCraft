@@ -354,10 +354,14 @@ fn speech_audio(package: &Package, project: &Project, cancel: &AtomicBool) -> Re
             return Ok((mono, 48_000, m.mic_offset_ms));
         }
     }
-    // the microphone (else system audio) track of the screen recording
-    let track = m.mic_track.or(m.system_track).ok_or("this recording has no audio to transcribe")?;
-    let file = std::sync::Arc::new(screencraft_encode::mp4read::Mp4File::open(&package.screen_path(project)).map_err(|e| e.to_string())?);
-    let mut src = crate::AudioSource::open(file, track as usize)?;
+    // the microphone (else system audio) track across all segments
+    let (mut src, offset_ms) = if let Some(s) = crate::SegmentedAudioSource::open_mic(package, project) {
+        (s, m.mic_offset_ms)
+    } else if let Some(s) = crate::SegmentedAudioSource::open_system(package, project) {
+        (s, 0.0)
+    } else {
+        return Err("this recording has no audio to transcribe".into());
+    };
     let total = src.duration_ms;
     let mut mono = Vec::with_capacity((total * 48.0) as usize);
     let mut t = 0.0;
@@ -369,7 +373,7 @@ fn speech_audio(package: &Package, project: &Project, cancel: &AtomicBool) -> Re
         mono.extend(pcm.chunks_exact(2).map(|f| (f[0] + f[1]) * 0.5));
         t += 1000.0;
     }
-    Ok((mono, 48_000, if m.mic_track.is_some() { m.mic_offset_ms } else { 0.0 }))
+    Ok((mono, 48_000, offset_ms))
 }
 
 fn transcribe_with(emit: &ProgressFn, req: &Request) -> Result<Vec<Caption>, String> {

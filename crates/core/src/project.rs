@@ -1,4 +1,4 @@
-﻿//! ScreenCraft project document. Serialised as `project.json` inside a
+//! ScreenCraft project document. Serialised as `project.json` inside a
 //! `.screencraft` package directory next to the recorded media.
 
 use crate::spring::SpringConfig;
@@ -30,6 +30,21 @@ impl Default for Rect {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct MediaSegment {
+    /// Screen video for this segment, relative to the package directory.
+    pub screen: String,
+    /// Start offset of this segment in the project's virtual source timeline (ms).
+    pub offset_ms: f64,
+    /// Duration of this segment (ms).
+    pub duration_ms: f64,
+    pub width: u32,
+    pub height: u32,
+    pub system_track: Option<u32>,
+    pub mic_track: Option<u32>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Media {
@@ -59,6 +74,27 @@ pub struct Media {
     pub mic_track: Option<u32>,
     /// A talking-head recording: the "screen" video is the camera picture itself (there is no screen).
     pub camera_only: bool,
+    /// Ordered media segments backing the virtual source timeline (empty for single-file projects).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub segments: Vec<MediaSegment>,
+}
+
+impl Media {
+    /// Returns the project's segments, falling back to a single segment backed by `self.screen`.
+    pub fn resolved_segments(&self) -> Vec<MediaSegment> {
+        if !self.segments.is_empty() {
+            return self.segments.clone();
+        }
+        vec![MediaSegment {
+            screen: self.screen.clone(),
+            offset_ms: 0.0,
+            duration_ms: self.duration_ms,
+            width: self.width,
+            height: self.height,
+            system_track: self.system_track,
+            mic_track: self.mic_track,
+        }]
+    }
 }
 
 impl Default for Media {
@@ -79,6 +115,7 @@ impl Default for Media {
             system_track: None,
             mic_track: None,
             camera_only: false,
+            segments: Vec::new(),
         }
     }
 }

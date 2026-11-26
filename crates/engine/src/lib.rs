@@ -21,4 +21,4 @@ pub use gif::{export_gif, GifReport};
 pub use export::{build_soundtrack, decode_music, mic_speech, export_project, render_frame_at, ExportOptions, ExportReport};
 pub use package::Package;
 pub use recorder::{CameraSpec, Finished, LiveStats, RecordOptions, Recording};
-pub use source::{AudioSource, FrameTable, Frames, MultiSource, VideoSource};
+pub use source::{AudioSource, FrameTable, Frames, MultiSource, SegmentedAudioSource, VideoSource};

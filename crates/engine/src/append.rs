@@ -1,67 +1,95 @@
-//! Add more footage to the end of a project: another `.screencraft` recording, or a plain MP4.
+//! Add more footage to a project: another `.screencraft` recording, or a plain MP4.
 //!
-//! A project plays one screen video, so the project's video and the new one are decoded and
-//! encoded again, one after the other, into a new `screen-N.mp4` at the project's size (the new
-//! part is fitted inside with black bars when its shape differs). Audio tracks are carried over
-//! (silence where a part has none), the cursor log of a recording is moved after the first part,
-//! and a new clip for the added part goes at the end of the timeline. Every edit already made
-//! stays where it was. The old video file is left for the caller to remove.
+//! Instead of decoding and re-encoding the entire project video, each added clip is copied into the
+//! package directory as `clip-N.mp4` and registered in `project.media.segments` on the unified
+//! virtual source timeline `[0, duration_ms]`. Decoding and scaling happen on demand during preview
+//! and final export, making append near-instant.
 
 use crate::package::Package;
 use screencraft_core::input::InputLog;
-use screencraft_core::project::{Project, Rect, Slice};
-use screencraft_encode::mp4read::{parse_avcc, Mp4File, Track};
-use screencraft_encode::opus::OpusDecoder;
-use screencraft_encode::{AudioConfig, Container, Effort, ExportSettings, FileSink, HwPreference, ThreadedExporter, VideoCodec, VideoConfig, I420};
+use screencraft_core::project::{MediaSegment, Project, Rect, Slice};
+use screencraft_encode::mp4read::Mp4File;
+use screencraft_encode::I420;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 /// One piece of footage to join.
-struct Part {
-    file: Arc<Mp4File>,
-    duration_ms: f64,
-    system: Option<Track>,
-    mic: Option<Track>,
+struct ExtraPart {
+    segments: Vec<(PathBuf, MediaSegment)>,
     /// Cursor / click log and the captured area, for recordings.
     input: Option<InputLog>,
     bounds: Option<Rect>,
 }
 
-fn audio_track(file: &Mp4File, index: Option<u32>) -> Option<Track> {
-    let i = index? as usize;
-    file.audio_tracks().nth(i).filter(|t| &t.codec == b"Opus").cloned()
-}
-
-fn open_part(path: &Path) -> Result<Part, String> {
+fn open_extra(path: &Path) -> Result<ExtraPart, String> {
     // A `.screencraft` folder, or any file inside one, is a recording.
-    let pkg_dir = if path.is_dir() { Some(path.to_path_buf()) } else { path.parent().filter(|p| p.join("project.json").exists()).map(Path::to_path_buf) };
+    let pkg_dir = if path.is_dir() {
+        Some(path.to_path_buf())
+    } else {
+        path.parent().filter(|p| p.join("project.json").exists()).map(Path::to_path_buf)
+    };
     if let Some(dir) = pkg_dir.filter(|d| d.join("project.json").exists()) {
         let pkg = Package::open(dir);
         let p = pkg.load_project()?;
         if p.media.mic.is_some() {
             return Err("this recording keeps its microphone in a separate file, which can't be joined yet".into());
         }
-        let file = Arc::new(Mp4File::open(&pkg.screen_path(&p)).map_err(|e| e.to_string())?);
+        let mut segments = Vec::new();
+        for seg in p.media.resolved_segments() {
+            let seg_path = pkg.dir.join(&seg.screen);
+            let file = Mp4File::open(&seg_path).map_err(|e| e.to_string())?;
+            let v = file.video().ok_or("a segment has no video")?;
+            if &v.codec != b"avc1" {
+                return Err(format!("only H.264 videos can be added ('{}' is not supported yet)", v.codec_str()));
+            }
+            let dur = if seg.duration_ms > 0.0 {
+                seg.duration_ms
+            } else if v.duration_us > 0 {
+                v.duration_us as f64 / 1000.0
+            } else {
+                file.duration_us as f64 / 1000.0
+            };
+            let mut s = seg;
+            s.duration_ms = dur;
+            if s.width == 0 || s.height == 0 {
+                s.width = v.width & !1;
+                s.height = v.height & !1;
+            }
+            segments.push((seg_path, s));
+        }
         let input = pkg.load_input(&p);
-        return Ok(Part {
-            system: audio_track(&file, p.media.system_track.or(if p.media.has_system_audio && p.media.mic_track.is_none() { Some(0) } else { None })),
-            mic: audio_track(&file, p.media.mic_track),
-            duration_ms: p.media.duration_ms,
+        return Ok(ExtraPart {
+            segments,
             input: Some(input),
             bounds: Some(p.media.bounds),
-            file,
         });
     }
-    let file = Arc::new(Mp4File::open(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?);
+
+    let file = Mp4File::open(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let v = file.video().ok_or("the file has no video")?;
+    if &v.codec != b"avc1" {
+        return Err(format!("only H.264 videos can be added ('{}' is not supported yet)", v.codec_str()));
+    }
     let duration_ms = if v.duration_us > 0 { v.duration_us as f64 / 1000.0 } else { file.duration_us as f64 / 1000.0 };
     // A plain video's first Opus track counts as its sound (other codecs aren't decoded).
-    let system = file.audio_tracks().find(|t| &t.codec == b"Opus").cloned();
-    Ok(Part { file, duration_ms, system, mic: None, input: None, bounds: None })
+    let system_track = file.audio_tracks().enumerate().find(|(_, t)| &t.codec == b"Opus").map(|(i, _)| i as u32);
+    let seg = MediaSegment {
+        screen: String::new(),
+        offset_ms: 0.0,
+        duration_ms,
+        width: v.width & !1,
+        height: v.height & !1,
+        system_track,
+        mic_track: None,
+    };
+    Ok(ExtraPart {
+        segments: vec![(path.to_path_buf(), seg)],
+        input: None,
+        bounds: None,
+    })
 }
 
 /// Box-filter `f` into a `w`×`h` picture, keeping its shape (black bars around it).
-fn fit(f: &I420, w: u32, h: u32) -> I420 {
+pub(crate) fn fit(f: &I420, w: u32, h: u32) -> I420 {
     if (f.width, f.height) == (w, h) {
         return f.clone();
     }
@@ -84,30 +112,6 @@ fn fit(f: &I420, w: u32, h: u32) -> I420 {
         out.v[d..d + cw].copy_from_slice(&inner.v[y * cw..(y + 1) * cw]);
     }
     out
-}
-
-/// Decoded stereo 48 kHz audio of `track`, exactly `frames` long (padded with silence or trimmed).
-fn decode_audio(file: &Mp4File, track: Option<&Track>, frames: usize) -> Result<Vec<f32>, String> {
-    let mut out = Vec::with_capacity(frames * 2);
-    if let Some(a) = track {
-        let ch = a.channels.clamp(1, 2) as usize;
-        let mut od = OpusDecoder::new(ch as u8).map_err(|e| e.to_string())?;
-        let pre_skip = if a.config.len() >= 4 { u16::from_be_bytes([a.config[2], a.config[3]]) as usize } else { 312 };
-        let mut skip = pre_skip * 2;
-        for s in &a.samples {
-            let raw = file.read_sample(s).map_err(|e| e.to_string())?;
-            let pcm = od.decode(&raw).map_err(|e| e.to_string())?;
-            let stereo: Vec<f32> = if ch == 1 { pcm.iter().flat_map(|x| [*x, *x]).collect() } else { pcm };
-            let n = skip.min(stereo.len());
-            skip -= n;
-            out.extend_from_slice(&stereo[n..]);
-            if out.len() >= frames * 2 {
-                break;
-            }
-        }
-    }
-    out.resize(frames * 2, 0.0);
-    Ok(out)
 }
 
 /// Move `log` (recorded over `from`) to start at `offset_ms`, mapping its positions onto `to`.
@@ -145,136 +149,118 @@ fn fresh_name(dir: &Path, stem: &str, ext: &str) -> String {
     (2..).map(|n| format!("{stem}-{n}.{ext}")).find(|n| !dir.join(n).exists()).unwrap()
 }
 
-/// What `append` did: the old screen video, now unused, for the caller to delete.
+/// What `append` did: the old screen video (empty when kept via multi-segment mode), added duration, and new slice ID.
 pub struct Appended {
     pub old_screen: PathBuf,
     pub added_ms: f64,
+    pub slice_id: String,
 }
 
-/// Join the footage at `extra` (a `.screencraft` folder or an MP4) onto the end of the project in
-/// `target`. `progress` gets 0..1 and returns false to cancel.
-pub fn append(target: &Path, extra: &Path, mut progress: impl FnMut(f32) -> bool) -> Result<Appended, String> {
+/// Join the footage at `extra` (a `.screencraft` folder or an MP4) onto the project in `target`,
+/// inserting its clip at `insert_at` (or at the end when `None`). `progress` gets 0..1 and returns
+/// false to cancel.
+pub fn append_at(target: &Path, extra: &Path, insert_at: Option<usize>, mut progress: impl FnMut(f32) -> bool) -> Result<Appended, String> {
     let pkg = Package::open(target);
     let mut project: Project = pkg.load_project()?;
     if project.media.mic.is_some() {
         return Err("this project keeps its microphone in a separate file, which can't be joined yet".into());
     }
-    let base = open_part(&pkg.dir)?;
-    let extra_part = open_part(extra)?;
     if extra.canonicalize().ok() == pkg.dir.canonicalize().ok() {
         return Err("that is this project".into());
     }
-    let parts = [base, extra_part];
-
-    let v0 = parts[0].file.video().ok_or("the project has no video")?;
-    let (w, h) = (v0.width & !1, v0.height & !1);
-    let fps = {
-        let s = &v0.samples;
-        if s.len() > 1 { ((s.len() as f64 - 1.0) * 1e6 / (s.last().unwrap().pts_us - s[0].pts_us).max(1) as f64).round().clamp(10.0, 120.0) } else { 30.0 }
-    };
-    let has_sys = parts.iter().any(|p| p.system.is_some());
-    let has_mic = parts.iter().any(|p| p.mic.is_some());
-    let mut audio_cfg = Vec::new();
-    if has_sys {
-        audio_cfg.push(AudioConfig::default());
+    if !progress(0.1) {
+        return Err("cancelled".into());
     }
-    if has_mic {
-        audio_cfg.push(AudioConfig::default());
+
+    let extra_part = open_extra(extra)?;
+    if project.media.segments.is_empty() {
+        project.media.segments = project.media.resolved_segments();
     }
-    let mic_index = if has_sys { 1 } else { 0 };
 
-    let mut video = VideoConfig::new(VideoCodec::H264, w, h, fps as u32);
-    video.bitrate_kbps = screencraft_encode::default_bitrate_kbps(w, h, fps as u32);
-    video.effort = Effort::Balanced;
-    video.hardware = HwPreference::Auto;
-
-    let screen_name = fresh_name(&pkg.dir, "screen", "mp4");
-    let out_path = pkg.dir.join(&screen_name);
-    let sink = FileSink::create(&out_path).map_err(|e| format!("cannot create {}: {e}", out_path.display()))?;
-    let exporter = ThreadedExporter::spawn(ExportSettings { container: Container::Mp4, video, audio: audio_cfg }, Box::new(sink)).map_err(|e| e.to_string())?;
-    let fail = |e: String| {
-        let _ = std::fs::remove_file(&out_path);
+    let base_ms = project.media.duration_ms;
+    let mut cur_ms = base_ms;
+    let mut copied_files: Vec<PathBuf> = Vec::new();
+    let cleanup = |files: &[PathBuf], e: String| {
+        for f in files {
+            let _ = std::fs::remove_file(f);
+        }
         e
     };
 
-    let total_samples: usize = parts.iter().filter_map(|p| p.file.video()).map(|v| v.samples.len()).sum::<usize>().max(1);
-    let mut done = 0usize;
-    let mut offset_us = 0i64;
-    let mut last_pts = -1i64;
-    for part in &parts {
-        let v = part.file.video().ok_or_else(|| fail("a part has no video".into()))?;
-        if &v.codec != b"avc1" {
-            return Err(fail(format!("only H.264 videos can be added ('{}' is not supported yet)", v.codec_str())));
-        }
-        let (plen, params) = parse_avcc(&v.config).map_err(|e| fail(e.to_string()))?;
-        let mut dec = screencraft_encode::h264::H264Decoder::new(&params, plen).map_err(|e| fail(e.to_string()))?;
-        let t0 = v.samples.first().map(|s| s.pts_us).unwrap_or(0);
-        let part_us = (part.duration_ms * 1000.0) as i64;
-        for s in &v.samples {
-            let raw = part.file.read_sample(s).map_err(|e| fail(e.to_string()))?;
-            if let Some(pic) = dec.decode(&raw).map_err(|e| fail(e.to_string()))? {
-                let pts = (offset_us + (s.pts_us - t0).clamp(0, part_us.max(1) - 1)).max(last_pts + 1);
-                last_pts = pts;
-                exporter.push_video(Arc::new(fit(&pic, w, h)), pts).map_err(|e| fail(e.to_string()))?;
-            }
-            done += 1;
-            if done % 8 == 0 && !progress(done as f32 / total_samples as f32 * 0.85) {
-                drop(exporter);
-                let _ = std::fs::remove_file(&out_path);
-                return Err("cancelled".into());
-            }
-        }
-        offset_us += part_us;
-    }
-    // audio, part after part, each exactly as long as its video
-    for part in &parts {
-        let frames = (part.duration_ms * 48.0).round() as usize;
-        if has_sys {
-            let pcm = decode_audio(&part.file, part.system.as_ref(), frames).map_err(fail)?;
-            exporter.push_audio(0, pcm).map_err(|e| fail(e.to_string()))?;
-        }
-        if has_mic {
-            let pcm = decode_audio(&part.file, part.mic.as_ref(), frames).map_err(fail)?;
-            exporter.push_audio(mic_index, pcm).map_err(|e| fail(e.to_string()))?;
+    let n_segs = extra_part.segments.len().max(1);
+    for (idx, (src_path, mut seg)) in extra_part.segments.into_iter().enumerate() {
+        let clip_name = fresh_name(&pkg.dir, "clip", "mp4");
+        let dst_path = pkg.dir.join(&clip_name);
+        std::fs::copy(&src_path, &dst_path).map_err(|e| cleanup(&copied_files, format!("cannot copy {}: {e}", src_path.display())))?;
+        copied_files.push(dst_path);
+        seg.screen = clip_name;
+        seg.offset_ms = cur_ms;
+        cur_ms += seg.duration_ms;
+        project.media.segments.push(seg);
+        if !progress(0.15 + 0.65 * ((idx + 1) as f32 / n_segs as f32)) {
+            return Err(cleanup(&copied_files, "cancelled".into()));
         }
     }
-    progress(0.92);
-    exporter.finish().map_err(|e| fail(e.to_string()))?;
+    let added_ms = cur_ms - base_ms;
 
-    // cursor log: the project's own, then the added part's, moved after it (skipped for webcam-only projects)
-    let base_ms = parts[0].duration_ms;
-    let added_ms = parts[1].duration_ms;
-    let log = if project.media.camera_only {
-        InputLog::default()
-    } else {
-        let mut l = parts[0].input.clone().unwrap_or_default();
-        if let (Some(extra_log), Some(from)) = (&parts[1].input, parts[1].bounds) {
+    // Cursor log & auto-zoom for the newly added recording (skipped for webcam-only projects).
+    if !project.media.camera_only {
+        if let (Some(extra_log), Some(from)) = (&extra_part.input, extra_part.bounds) {
+            let mut log = pkg.load_input(&project);
             let moved = shift_input(extra_log, from, project.media.bounds, base_ms);
-            l.moves.extend(moved.moves);
-            l.clicks.extend(moved.clicks);
-            l.keys.extend(moved.keys);
-            l.carets.extend(moved.carets);
-        }
-        l
-    };
-    let input_name = fresh_name(&pkg.dir, "input", "json");
-    std::fs::write(pkg.dir.join(&input_name), serde_json::to_vec(&log).map_err(|e| fail(e.to_string()))?).map_err(|e| fail(e.to_string()))?;
+            log.moves.extend(moved.moves);
+            log.clicks.extend(moved.clicks);
+            log.keys.extend(moved.keys);
+            log.carets.extend(moved.carets);
+            let input_name = fresh_name(&pkg.dir, "input", "json");
+            let data = serde_json::to_vec(&log).map_err(|e| cleanup(&copied_files, e.to_string()))?;
+            std::fs::write(pkg.dir.join(&input_name), data).map_err(|e| cleanup(&copied_files, e.to_string()))?;
+            project.media.input = input_name;
 
-    // the project: longer media, the new audio layout, and one more clip at the end
-    let old_screen = pkg.screen_path(&project);
-    let m = &mut project.media;
-    m.screen = screen_name;
-    m.input = input_name;
-    m.duration_ms = base_ms + added_ms;
-    m.width = w;
-    m.height = h;
-    m.has_system_audio = has_sys;
-    m.has_microphone = has_mic;
-    m.system_track = has_sys.then_some(0);
-    m.mic_track = has_mic.then_some(mic_index as u32);
+            // Generate auto-zooms for the newly added recording segment and shift them to [base_ms, cur_ms].
+            let local_log = shift_input(extra_log, from, project.media.bounds, 0.0);
+            let opts = screencraft_core::zoom::AutoZoomOptions::for_ease(
+                project.config.animations.default_zoom,
+                project.config.animations.ease_in_ms,
+            );
+            let mut next_z = 0usize;
+            for mut z in screencraft_core::zoom::generate(&local_log, added_ms, &opts) {
+                z.source_start_ms += base_ms;
+                z.source_end_ms += base_ms;
+                while project.scene.zooms.iter().any(|existing| existing.id == format!("zoom-add-{next_z}")) {
+                    next_z += 1;
+                }
+                z.id = format!("zoom-add-{next_z}");
+                next_z += 1;
+                project.scene.zooms.push(z);
+            }
+        }
+    }
+
+    let has_sys = project.media.segments.iter().any(|s| s.system_track.is_some());
+    let has_mic = project.media.segments.iter().any(|s| s.mic_track.is_some());
+    project.media.duration_ms = cur_ms;
+    project.media.has_system_audio = has_sys;
+    project.media.has_microphone = has_mic;
+
     let n = (0..).find(|i| !project.scene.slices.iter().any(|s| s.id == format!("slice-add-{i}"))).unwrap();
-    project.scene.slices.push(Slice { id: format!("slice-add-{n}"), source_start_ms: base_ms, source_end_ms: base_ms + added_ms, ..Default::default() });
-    pkg.save_project(&project).map_err(fail)?;
+    let slice_id = format!("slice-add-{n}");
+    let new_slice = Slice {
+        id: slice_id.clone(),
+        source_start_ms: base_ms,
+        source_end_ms: cur_ms,
+        ..Default::default()
+    };
+    let idx = insert_at.map(|i| i.min(project.scene.slices.len())).unwrap_or(project.scene.slices.len());
+    project.scene.slices.insert(idx, new_slice);
+
+    pkg.save_project(&project).map_err(|e| cleanup(&copied_files, e))?;
     progress(1.0);
-    Ok(Appended { old_screen, added_ms })
+    Ok(Appended { old_screen: PathBuf::new(), added_ms, slice_id })
+}
+
+/// Join the footage at `extra` (a `.screencraft` folder or an MP4) onto the end of the project in
+/// `target`. `progress` gets 0..1 and returns false to cancel.
+pub fn append(target: &Path, extra: &Path, progress: impl FnMut(f32) -> bool) -> Result<Appended, String> {
+    append_at(target, extra, None, progress)
 }

@@ -26,6 +26,7 @@ pub struct View {
     pub snap_enabled: bool,
     drag: Option<Drag>,
     preview: Option<Preview>,
+    ctx_menu: Option<(String, Pos2)>,
 }
 
 impl Default for View {
@@ -37,6 +38,7 @@ impl Default for View {
             snap_enabled: true,
             drag: None,
             preview: None,
+            ctx_menu: None,
         }
     }
 }
@@ -129,15 +131,15 @@ fn set_zoom(st: &mut EditorState, z: f64, anchor_frac_x: Option<(f32, f32)>, tra
     st.timeline.scroll_x = st.timeline.scroll_x.clamp(0.0, max_scroll);
 }
 
-pub fn show(st: &mut EditorState, ui: &mut egui::Ui) {
+pub fn show(st: &mut EditorState, ui: &mut egui::Ui, recordings_dir: &std::path::Path) {
     if st.timeline.zoom < 1.0 {
         st.timeline.zoom = 1.0;
     }
-    tools(st, ui);
-    body(st, ui);
+    tools(st, ui, recordings_dir);
+    body(st, ui, recordings_dir);
 }
 
-fn tools(st: &mut EditorState, ui: &mut egui::Ui) {
+fn tools(st: &mut EditorState, ui: &mut egui::Ui, recordings_dir: &std::path::Path) {
     let r = ui.allocate_ui(Vec2::new(ui.available_width(), 42.0), |ui| {
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
@@ -147,8 +149,33 @@ fn tools(st: &mut EditorState, ui: &mut egui::Ui) {
             if kit::icon_btn(ui, "duplicate", "Duplicate selected clip (Ctrl+D)").clicked() {
                 st.duplicate_selected();
             }
-            if kit::icon_btn(ui, "trash", "Delete selected (Del)").clicked() {
+            let single_slice = matches!(&st.sel, Sel::Slice(_)) && st.project.scene.slices.len() <= 1;
+            let del_tip = if single_slice {
+                "Cannot delete the only clip (use Discard in the top bar to delete the project)"
+            } else {
+                "Delete selected (Del)"
+            };
+            if kit::icon_btn_sized(ui, "trash", del_tip, 32.0, 18.0, !single_slice).clicked() && !single_slice {
                 st.delete_selected();
+            }
+            if kit::pill(ui, Some("plus"), "Add video", false, true, false, None)
+                .on_hover_text("Add an existing video or recording after the selected clip (or at the end)")
+                .clicked()
+            {
+                if let Some(path) = super::dialogs::pick_footage(recordings_dir) {
+                    st.footage_request = Some(super::FootageRequest::Add {
+                        path,
+                        insert_at: st.default_insert_index(),
+                    });
+                }
+            }
+            if kit::pill(ui, Some("record"), "Record", false, true, false, Some(Color32::from_rgb(0xff, 0x7b, 0x88)))
+                .on_hover_text("Record a new clip and insert it after the selected clip (or at the end)")
+                .clicked()
+            {
+                st.footage_request = Some(super::FootageRequest::RecordMore {
+                    insert_at: st.default_insert_index(),
+                });
             }
             if kit::pill(ui, None, "Auto zooms", false, true, false, None).on_hover_text("Regenerate zooms from clicks").clicked() {
                 st.auto_zoom();
@@ -470,7 +497,7 @@ fn build_blocks(st: &mut EditorState, ctx: &egui::Context) -> (Vec<Block>, Vec<(
     (blocks, markers, note_lanes, empty_flags)
 }
 
-fn body(st: &mut EditorState, ui: &mut egui::Ui) {
+fn body(st: &mut EditorState, ui: &mut egui::Ui, recordings_dir: &std::path::Path) {
     let total = st.duration_ms().max(1.0);
     let (blocks, markers, note_lanes, (empty_layouts, empty_annots, empty_caps, empty_music)) = build_blocks(st, ui.ctx());
 
@@ -667,6 +694,22 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
     };
 
     let preview_now = st.timeline.preview.clone();
+    if resp_all.secondary_clicked() {
+        st.timeline.ctx_menu = None;
+        if let Some(pos) = pointer {
+            let in_tracks = pos.x >= tracks_left;
+            let in_ruler = pos.y < body_rect.min.y + RULER_H + 1.0;
+            if in_tracks && !in_ruler {
+                if let Some((bi, _)) = hit_block(pos, &preview_now, v_off) {
+                    if blocks[bi].kind == Kind::Clip {
+                        let id = blocks[bi].id.clone();
+                        st.select(Sel::Slice(id.clone()));
+                        st.timeline.ctx_menu = Some((id, pos));
+                    }
+                }
+            }
+        }
+    }
     if resp_all.drag_started() || (resp_all.clicked() && st.timeline.drag.is_none()) {
         if let Some(pos) = pointer {
             let in_tracks = pos.x >= tracks_left;
@@ -1171,6 +1214,104 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
     }
     if st.timeline.drag.is_some() && ui.ctx().input(|i| i.pointer.any_down()) {
         ui.ctx().request_repaint();
+    }
+    clip_context_menu(st, ui.ctx(), recordings_dir);
+}
+
+fn clip_context_menu(st: &mut EditorState, ctx: &egui::Context, recordings_dir: &std::path::Path) {
+    let Some((clip_id, pos)) = st.timeline.ctx_menu.clone() else {
+        return;
+    };
+    let Some(slice_idx) = st.project.scene.slices.iter().position(|s| s.id == clip_id) else {
+        st.timeline.ctx_menu = None;
+        return;
+    };
+    let can_delete = st.project.scene.slices.len() > 1;
+    enum ClipMenuAct {
+        Add(usize),
+        Record(usize),
+        Duplicate,
+        Delete,
+    }
+    let mut action: Option<ClipMenuAct> = None;
+    let area = egui::Area::new(egui::Id::new("tl-clip-ctx"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(pos)
+        .show(ctx, |ui| {
+            egui::Frame::new()
+                .fill(PANEL_2)
+                .stroke(Stroke::new(1.0, LINE_2))
+                .corner_radius(CornerRadius::same(10))
+                .inner_margin(egui::Margin::same(6))
+                .shadow(egui::Shadow { offset: [0, 14], blur: 44, spread: 0, color: Color32::from_black_alpha(140) })
+                .show(ui, |ui| {
+                    ui.set_min_width(210.0);
+                    ui.set_max_width(260.0);
+                    ui.spacing_mut().item_spacing = Vec2::ZERO;
+                    fn item(ui: &mut egui::Ui, label: &str, enabled: bool) -> bool {
+                        let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::click());
+                        if enabled && resp.hovered() {
+                            ui.painter().rect_filled(r, CornerRadius::same(6), RAISE);
+                        }
+                        let col = if enabled { TEXT } else { MUTED };
+                        ui.painter().text(Pos2::new(r.min.x + 10.0, r.center().y), Align2::LEFT_CENTER, label, kit::font(13.0), col);
+                        enabled && resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+                    }
+                    fn sep(ui: &mut egui::Ui) {
+                        ui.add_space(4.0);
+                        let (r, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
+                        ui.painter().rect_filled(r, 0.0, LINE_2);
+                        ui.add_space(4.0);
+                    }
+                    if item(ui, "Insert video after…", true) {
+                        action = Some(ClipMenuAct::Add(slice_idx + 1));
+                    }
+                    if item(ui, "Record new clip after", true) {
+                        action = Some(ClipMenuAct::Record(slice_idx + 1));
+                    }
+                    sep(ui);
+                    if item(ui, "Insert video before…", true) {
+                        action = Some(ClipMenuAct::Add(slice_idx));
+                    }
+                    if item(ui, "Record new clip before", true) {
+                        action = Some(ClipMenuAct::Record(slice_idx));
+                    }
+                    sep(ui);
+                    if item(ui, "Duplicate clip", true) {
+                        action = Some(ClipMenuAct::Duplicate);
+                    }
+                    if item(ui, "Delete clip", can_delete) {
+                        action = Some(ClipMenuAct::Delete);
+                    }
+                });
+        });
+
+    let outside = ctx.input(|i| i.pointer.any_pressed())
+        && ctx.input(|i| i.pointer.interact_pos()).is_some_and(|p| !area.response.rect.contains(p));
+    let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+
+    if let Some(act) = action {
+        st.timeline.ctx_menu = None;
+        match act {
+            ClipMenuAct::Add(idx) => {
+                if let Some(path) = super::dialogs::pick_footage(recordings_dir) {
+                    st.footage_request = Some(super::FootageRequest::Add { path, insert_at: Some(idx) });
+                }
+            }
+            ClipMenuAct::Record(idx) => {
+                st.footage_request = Some(super::FootageRequest::RecordMore { insert_at: Some(idx) });
+            }
+            ClipMenuAct::Duplicate => {
+                st.select(Sel::Slice(clip_id));
+                st.duplicate_selected();
+            }
+            ClipMenuAct::Delete => {
+                st.select(Sel::Slice(clip_id));
+                st.delete_selected();
+            }
+        }
+    } else if outside || esc {
+        st.timeline.ctx_menu = None;
     }
 }
 

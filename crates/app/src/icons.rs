@@ -53,6 +53,7 @@ pub fn markup(name: &str) -> &'static str {
         "window" => r#"<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 9h18"/>"#,
         "area" => r#"<path d="M4 8V5a1 1 0 011-1h3M16 4h3a1 1 0 011 1v3M20 16v3a1 1 0 01-1 1h-3M8 20H5a1 1 0 01-1-1v-3"/>"#,
         "stop" => r#"<rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none"/>"#,
+        "record" => r#"<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="4" fill="currentColor" stroke="none"/>"#,
         "close" => r#"<path d="M6 6l12 12M18 6L6 18"/>"#,
         "plus" => r#"<path d="M12 5v14M5 12h14"/>"#,
         "music" => r#"<path d="M9 18V6l10-2v12"/><circle cx="6.500" cy="18" r="2.500"/><circle cx="16.500" cy="16" r="2.500"/>"#,

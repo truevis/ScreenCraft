@@ -164,11 +164,11 @@ impl crate::audio_mix::PcmSource for PcmFile {
 
 /// Mic playback is always centred: both channels are averaged and sent to both ears (many mics
 /// deliver two channels with one of them empty).
-struct MonoAvg(AudioSource);
+struct MonoAvg<S>(S);
 
-impl crate::audio_mix::PcmSource for MonoAvg {
+impl<S: crate::audio_mix::PcmSource> crate::audio_mix::PcmSource for MonoAvg<S> {
     fn read(&mut self, start_ms: f64, frames: usize) -> Vec<f32> {
-        let mut pcm = self.0.read(start_ms, frames).unwrap_or_else(|_| vec![0.0; frames * 2]);
+        let mut pcm = self.0.read(start_ms, frames);
         for f in pcm.chunks_exact_mut(2) {
             let m = (f[0] + f[1]) * 0.5;
             f[0] = m;
@@ -249,17 +249,20 @@ pub fn build_soundtrack(package: &Package, project: &Project, track: &screencraf
     let mut lanes = Vec::new();
     let mut mic: Option<Arc<MicInfo>> = None;
     if recorded {
-        let screen_path = package.screen_path(project);
-        let file = Arc::new(Mp4File::open(&screen_path).map_err(|e| e.to_string())?);
-        let size = std::fs::metadata(&screen_path).map(|m| m.len()).unwrap_or(0);
-        if let (Some(t), false) = (project.media.system_track, a.mute_system_audio) {
-            if let Ok(src) = AudioSource::open(file.clone(), t as usize) {
+        if !a.mute_system_audio {
+            if let Some(src) = crate::source::SegmentedAudioSource::open_system(package, project) {
                 lanes.push(Lane { source: Box::new(src), gain: master * a.device_volume as f32 });
             }
         }
-        if let (Some(t), false) = (project.media.mic_track, a.mute_microphone) {
-            if let Ok(src) = AudioSource::open(file.clone(), t as usize) {
-                mic = analyse_mic(&file, t as usize, (screen_path.clone(), t, size));
+        if !a.mute_microphone {
+            if let Some(src) = crate::source::SegmentedAudioSource::open_mic(package, project) {
+                if let Some(t) = project.media.mic_track {
+                    let screen_path = package.screen_path(project);
+                    if let Ok(file) = Mp4File::open(&screen_path).map(Arc::new) {
+                        let size = std::fs::metadata(&screen_path).map(|m| m.len()).unwrap_or(0);
+                        mic = analyse_mic(&file, t as usize, (screen_path, t, size));
+                    }
+                }
                 let level = mic.as_ref().map(|m| m.gain).unwrap_or(1.0);
                 lanes.push(Lane { source: Box::new(MonoAvg(src)), gain: master * a.mic_volume as f32 * level });
             }
