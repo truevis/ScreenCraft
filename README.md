@@ -20,11 +20,6 @@
 </p>
 
 <p align="center">
-  <a href="https://screencraft.mdnlabs.dev">Website</a> ·
-  <a href="CHANGELOG.md">Changelog</a>
-</p>
-
-<p align="center">
   <a href="#windows-edition-this-fork"><b>Windows edition</b></a> ·
   <a href="#screenshots">Screenshots</a> ·
   <a href="#what-it-does">Features</a> ·
@@ -311,8 +306,7 @@ display, report, quit).
 This project is licensed under the MIT License. By using this software, you agree that the authors are not liable for any issues, damages, or claims arising from its use.
 
 See [LICENSE](LICENSE) for the full text, [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) for the open-source
-components ScreenCraft uses, and [COMPLIANCE.md](COMPLIANCE.md) for the legal and compliance guide. The
-[website](https://screencraft.mdnlabs.dev) has the privacy policy, terms and cookie policy.
+components ScreenCraft uses, and [COMPLIANCE.md](COMPLIANCE.md) for the legal and compliance guide.
 
 ## Known limitations
 
