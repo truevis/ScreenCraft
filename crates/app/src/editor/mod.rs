@@ -19,7 +19,7 @@ use screencraft_core::project::Project;
 use screencraft_core::timeline::{display_to_effective, effective_duration_ms, effective_to_display, output_to_source};
 use screencraft_core::track::{compute_track, RenderTrack};
 use screencraft_engine::{build_soundtrack, FrameTable, Package};
-use screencraft_render::{build_scene, output_size, Compositor, Slot};
+use screencraft_render::{build_scene_in, output_size, Compositor, Slot};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -130,6 +130,34 @@ pub enum FootageRequest {
     Add(std::path::PathBuf),
 }
 
+#[derive(Clone, Copy)]
+enum CropEdge {
+    Left,
+    Right,
+    Top,
+    Bottom,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+#[derive(Clone)]
+struct CropDrag {
+    edge: CropEdge,
+    p0: Pos2,
+    start: screencraft_core::project::Rect,
+    content_size: Vec2,
+}
+
+#[derive(Clone)]
+struct CachedPreview {
+    key: (u64, usize, u64, u32, Option<i64>),
+    out: (u32, u32),
+    screen: [f32; 4],
+    bounds: Vec<screencraft_render::overlay::Bound>,
+}
+
 pub struct EditorState {
     pub package: Package,
     pub project: Project,
@@ -155,6 +183,9 @@ pub struct EditorState {
     table: FrameTable,
     worker: PreviewWorker,
     uploaded_key: Option<(usize, Option<usize>, Option<usize>)>,
+    upload_gen: u64,
+    project_rev: u64,
+    cached_preview: Option<CachedPreview>,
     cam_table: Option<FrameTable>,
     compositor: Compositor,
     render_state: eframe::egui_wgpu::RenderState,
@@ -181,6 +212,8 @@ pub struct EditorState {
     /// Last scene's annotation boxes and geometry (for the drag handles on the preview).
     preview_geo: Option<PreviewGeo>,
     annot_drag: Option<AnnotDrag>,
+    crop_drag: Option<CropDrag>,
+    pub preview_override_src: Option<f64>,
     pub preview_res: u32,
     pub swatches: HashMap<String, egui::TextureHandle>,
     pub panel: panels::PanelState,
@@ -188,13 +221,14 @@ pub struct EditorState {
     pub title_edit: Option<String>,
     pub side_w: f32,
     pub tl_h: f32,
-    pub wants_back: bool,
     /// A project the user asked to open from this window's Projects menu.
     pub open_request: Option<std::path::PathBuf>,
     /// Raw video to open in the compressor window.
     pub compress_request: Option<std::path::PathBuf>,
     /// Asked from the Projects menu: leave this editor to record, or add footage to this project.
     pub footage_request: Option<FootageRequest>,
+    /// User confirmed discarding (permanently deleting) this recording/project.
+    pub discard_request: bool,
     /// The preview fills the whole screen (F11 / the full-screen button; Esc leaves).
     pub full_preview: bool,
     /// Waveform peaks (0..1, 3000 bins) of music files, filled in by a worker.
@@ -221,17 +255,33 @@ impl EditorState {
         let worker = PreviewWorker::spawn(package.clone(), project.clone(), ctx.clone());
         let compositor = Compositor::new(&render_state.device, &render_state.queue);
 
-        // Waveform peaks, computed once in the background.
+        // Waveform peaks, computed once in the background (combining system + mic when both exist).
         let (wtx, wrx) = std::sync::mpsc::channel();
         {
             let (path, ctx) = (screen.clone(), ctx.clone());
-            let track = project.media.system_track.or(project.media.mic_track);
+            let tracks: Vec<usize> = [project.media.system_track, project.media.mic_track]
+                .into_iter()
+                .flatten()
+                .map(|t| t as usize)
+                .collect();
             std::thread::spawn(move || {
-                if let Some(t) = track {
-                    if let Ok(peaks) = waveform_peaks(&path, t as usize) {
-                        let _ = wtx.send(peaks);
-                        ctx.request_repaint();
+                let mut combined: Vec<f32> = Vec::new();
+                for t in tracks {
+                    if let Ok(peaks) = waveform_peaks(&path, t) {
+                        if combined.is_empty() {
+                            combined = peaks;
+                        } else {
+                            let len = combined.len().max(peaks.len());
+                            combined.resize(len, 0.0);
+                            for (dst, &src) in combined.iter_mut().zip(&peaks) {
+                                *dst = dst.max(src);
+                            }
+                        }
                     }
+                }
+                if !combined.is_empty() {
+                    let _ = wtx.send(combined);
+                    ctx.request_repaint();
                 }
             });
         }
@@ -258,6 +308,9 @@ impl EditorState {
             table,
             worker,
             uploaded_key: None,
+            upload_gen: 0,
+            project_rev: 0,
+            cached_preview: None,
             cam_table: None,
             compositor,
             render_state,
@@ -278,6 +331,8 @@ impl EditorState {
             preview_shown: None,
             preview_geo: None,
             annot_drag: None,
+            crop_drag: None,
+            preview_override_src: None,
             preview_res: 720,
             swatches: HashMap::new(),
             panel: panels::PanelState::default(),
@@ -285,10 +340,10 @@ impl EditorState {
             title_edit: None,
             side_w: 340.0,
             tl_h: 350.0,
-            wants_back: false,
             open_request: None,
             compress_request: None,
             footage_request: None,
+            discard_request: false,
             full_preview: false,
             music_peaks: HashMap::new(),
             peaks_pending: Default::default(),
@@ -384,14 +439,22 @@ impl EditorState {
     }
 
     /// Mark the project edited by the UI: recompute the track and schedule a save.
-    fn changed(&mut self) {
+    fn changed(&mut self, audio_changed: bool) {
         self.track_dirty = true;
         self.eff_track = None;
+        self.project_rev = self.project_rev.wrapping_add(1);
         self.dirty = true;
         self.dirty_since = Some(Instant::now());
-        if self.playing {
+        if self.playing && audio_changed {
             self.restart_audio();
         }
+    }
+
+    fn audio_differs(a: &Project, b: &Project) -> bool {
+        a.scene.slices != b.scene.slices
+            || a.scene.music_clips != b.scene.music_clips
+            || a.config.audio != b.config.audio
+            || a.media != b.media
     }
 
     /// Run `edit` on the project. History is pushed once per burst of edits.
@@ -404,6 +467,7 @@ impl EditorState {
         let before = self.project.clone();
         edit(&mut self.project);
         if self.project != before {
+            let audio_changed = Self::audio_differs(&self.project, &before);
             let same = key.is_some() && self.last_undo_key.as_deref() == key && self.last_undo_push.elapsed() < Duration::from_millis(900);
             if !same && self.last_undo_push.elapsed() > Duration::from_millis(250) || (!same && key.is_some()) {
                 self.undo.push(before);
@@ -414,7 +478,7 @@ impl EditorState {
             self.last_undo_key = key.map(String::from);
             self.last_undo_push = Instant::now();
             self.redo.clear();
-            self.changed();
+            self.changed(audio_changed);
             let d = self.duration_ms();
             self.playhead_ms = self.playhead_ms.min(d);
         }
@@ -422,17 +486,19 @@ impl EditorState {
 
     pub fn undo(&mut self) {
         if let Some(p) = self.undo.pop() {
+            let audio_changed = Self::audio_differs(&p, &self.project);
             self.redo.push(std::mem::replace(&mut self.project, p));
             self.sel = Sel::None;
-            self.changed();
+            self.changed(audio_changed);
         }
     }
 
     pub fn redo(&mut self) {
         if let Some(p) = self.redo.pop() {
+            let audio_changed = Self::audio_differs(&p, &self.project);
             self.undo.push(std::mem::replace(&mut self.project, p));
             self.sel = Sel::None;
-            self.changed();
+            self.changed(audio_changed);
         }
     }
 
@@ -936,7 +1002,7 @@ impl EditorState {
     }
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
-        if ctx.egui_wants_keyboard_input() {
+        if ctx.egui_wants_keyboard_input() || self.dialogs.discard || self.close_prompt.is_some() {
             return;
         }
         let k = |key: egui::Key| ctx.input(|i| i.key_pressed(key) && !i.modifiers.command);
@@ -1033,6 +1099,12 @@ impl EditorState {
                 self.undo();
             }
         }
+        if cmd && pressed(egui::Key::Y) {
+            self.redo();
+        }
+        if cmd && pressed(egui::Key::D) {
+            self.duplicate_selected();
+        }
         if cmd && pressed(egui::Key::E) {
             self.export.open = true;
         }
@@ -1064,8 +1136,13 @@ impl EditorState {
         if self.track.count == 0 {
             return;
         }
-        let i = self.frame_index();
-        let t_src = self.track.t_src[i];
+        let mut i = self.frame_index();
+        let t_src = if let Some(src_ms) = self.preview_override_src {
+            i = self.track.t_src.iter().position(|t| *t >= src_ms).unwrap_or(i);
+            src_ms
+        } else {
+            self.track.t_src[i]
+        };
         let want_screen = self.table.index_at(t_src);
         let off = self.project.media.camera_offset_ms;
         if self.cam_table.is_none() && self.worker.has_camera {
@@ -1074,7 +1151,11 @@ impl EditorState {
             }
         }
         let want_cam = self.cam_table.as_ref().map(|t| t.index_at(t_src + off));
-        let other = self.track.other_alpha.get(i).filter(|a| **a > 0.003).map(|_| self.track.other_t_src[i]);
+        let other = if self.preview_override_src.is_some() {
+            None
+        } else {
+            self.track.other_alpha.get(i).filter(|a| **a > 0.003).map(|_| self.track.other_t_src[i])
+        };
         let want_other = other.map(|t| self.table.index_at(t));
         let key = (want_screen, want_cam, want_other);
         self.worker.request(Want { t_src, other_t: other, key });
@@ -1090,6 +1171,7 @@ impl EditorState {
                         }
                     }
                     self.uploaded_key = Some(r.key);
+                    self.upload_gen = self.upload_gen.wrapping_add(1);
                 }
                 Err(e) => self.error = Some(e),
             }
@@ -1105,46 +1187,64 @@ impl EditorState {
             size = Vec2::new(rect.height() * aspect, rect.height());
         }
         let shown = Rect::from_center_size(rect.center(), size);
-        let scene = build_scene(&self.project, &self.track, i, (w, h));
+        let render_key = (self.project_rev, i, self.upload_gen, self.preview_res, self.preview_override_src.map(|v| v.round() as i64));
+        let hit = self.tex.is_some() && self.cached_preview.as_ref().is_some_and(|c| c.key == render_key && c.out == (w, h));
+        let (scene_screen, bounds) = if hit {
+            let c = self.cached_preview.as_ref().unwrap();
+            (c.screen, c.bounds.clone())
+        } else {
+            let scene = build_scene_in(&self.project, &self.track, i, (w, h), None, Some(&self.package.dir));
+            self.compositor.render(&scene);
+            let cached = CachedPreview {
+                key: render_key,
+                out: (w, h),
+                screen: scene.screen,
+                bounds: scene.layers.bounds,
+            };
+            let res = (cached.screen, cached.bounds.clone());
+            self.cached_preview = Some(cached);
+            res
+        };
         self.preview_content = Some(Rect::from_min_size(
-            shown.min + Vec2::new(scene.screen[0] / w as f32 * shown.width(), scene.screen[1] / h as f32 * shown.height()),
-            Vec2::new(scene.screen[2] / w as f32 * shown.width(), scene.screen[3] / h as f32 * shown.height()),
+            shown.min + Vec2::new(scene_screen[0] / w as f32 * shown.width(), scene_screen[1] / h as f32 * shown.height()),
+            Vec2::new(scene_screen[2] / w as f32 * shown.width(), scene_screen[3] / h as f32 * shown.height()),
         ));
         self.preview_geo = Some(PreviewGeo {
             out: (w, h),
-            sr: scene.screen,
+            sr: scene_screen,
             view_w: self.project.config.crop.width as f32 / self.track.zoom[i] as f32,
             view_h: self.project.config.crop.height as f32 / self.track.zoom[i] as f32,
-            bounds: scene.layers.bounds.clone(),
+            bounds,
         });
-        self.compositor.render(&scene);
-        let view = self.compositor.target_view().unwrap();
-        let mut renderer = self.render_state.renderer.write();
-        let id = match self.tex {
-            Some((id, sz)) if sz == (w, h) => id,
-            Some((id, _)) => {
-                renderer.update_egui_texture_from_wgpu_texture(&self.render_state.device, view, eframe::wgpu::FilterMode::Linear, id);
-                self.tex = Some((id, (w, h)));
-                id
-            }
-            None => {
-                let id = renderer.register_native_texture(&self.render_state.device, view, eframe::wgpu::FilterMode::Linear);
-                self.tex = Some((id, (w, h)));
-                id
+        let id = if hit {
+            self.tex.unwrap().0
+        } else {
+            let view = self.compositor.target_view().unwrap();
+            let mut renderer = self.render_state.renderer.write();
+            match self.tex {
+                Some((id, sz)) if sz == (w, h) => id,
+                Some((id, _)) => {
+                    renderer.update_egui_texture_from_wgpu_texture(&self.render_state.device, view, eframe::wgpu::FilterMode::Linear, id);
+                    self.tex = Some((id, (w, h)));
+                    id
+                }
+                None => {
+                    let id = renderer.register_native_texture(&self.render_state.device, view, eframe::wgpu::FilterMode::Linear);
+                    self.tex = Some((id, (w, h)));
+                    id
+                }
             }
         };
-        drop(renderer);
         ui.painter().image(id, shown, Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)), Color32::WHITE);
         self.preview_shown = Some(shown);
         self.draw_preview_overlays(ui, i);
     }
 
-    /// The editor's whole UI. Returns `true` when the user asked to go back to the library.
-    pub fn ui(&mut self, ui: &mut egui::Ui) -> bool {
+    /// The editor's whole UI.
+    pub fn ui(&mut self, ui: &mut egui::Ui, prefs: &mut crate::prefs::Prefs) {
         let ctx = ui.ctx().clone();
         self.tick(&ctx);
         self.handle_keys(&ctx);
-        self.wants_back = false;
 
         let (f11, esc) = ctx.input(|i| (i.key_pressed(egui::Key::F11), i.key_pressed(egui::Key::Escape)));
         if f11 || (esc && self.full_preview) {
@@ -1162,7 +1262,7 @@ impl EditorState {
                     self.set_full_preview(&ctx, false);
                 }
             });
-            return self.wants_back;
+            return;
         }
 
         egui::Panel::top("editor-top")
@@ -1208,25 +1308,15 @@ impl EditorState {
                 self.error = None;
             }
         }
-        export_ui::show(self, &ctx);
-        dialogs::show(self, &ctx);
+        export_ui::show(self, &ctx, prefs);
+        dialogs::show(self, &ctx, prefs);
         dialogs::save_prompt(self, &ctx);
-        self.wants_back
+        dialogs::discard_prompt(self, &ctx);
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
-            for (name, tip, url) in [
-                ("x", "ScreenCraft on X (@mdnlabs)", "https://x.com/mdnlabs"),
-                ("github", "ScreenCraft on GitHub", "https://github.com/MarshallNickolauson/ScreenCraft"),
-                ("bug", "Report a bug or request a feature", "https://github.com/MarshallNickolauson/ScreenCraft/issues"),
-            ] {
-                if kit::icon_btn_sized(ui, name, tip, 32.0, 17.0, true).clicked() {
-                    let _ = open_url(url);
-                }
-            }
-            ui.add_space(2.0);
             // Projects button
             let tw = kit::text_width(ui, "Projects", 13.0);
             let (rect, resp) = ui.allocate_exact_size(Vec2::new(tw + 10.0 * 2.0 + 16.0 + 8.0, 32.0), Sense::click());
@@ -1255,6 +1345,14 @@ impl EditorState {
                 if r.on_hover_text(tip).clicked() && self.dirty {
                     self.save_now();
                 }
+                let discard_col = Color32::from_rgb(0xff, 0x8a, 0x97);
+                if kit::pill(ui, Some("trash"), "Discard", false, false, false, Some(discard_col))
+                    .on_hover_text("Discard and permanently delete this recording")
+                    .clicked()
+                {
+                    self.pause();
+                    self.dialogs.discard = true;
+                }
                 let r = kit::pill(ui, Some("sparkle"), "Presets", self.dialogs.presets_open, false, true, None);
                 if r.clicked() {
                     self.dialogs.presets_open = !self.dialogs.presets_open;
@@ -1272,10 +1370,10 @@ impl EditorState {
                 }
                 let can_redo = !self.redo.is_empty();
                 let can_undo = !self.undo.is_empty();
-                if kit::icon_btn_sized(ui, "redo", "Redo (⇧⌘Z)", 32.0, 18.0, can_redo).clicked() && can_redo {
+                if kit::icon_btn_sized(ui, "redo", "Redo (Ctrl+Shift+Z / Ctrl+Y)", 32.0, 18.0, can_redo).clicked() && can_redo {
                     self.redo();
                 }
-                if kit::icon_btn_sized(ui, "undo", "Undo (⌘Z)", 32.0, 18.0, can_undo).clicked() && can_undo {
+                if kit::icon_btn_sized(ui, "undo", "Undo (Ctrl+Z)", 32.0, 18.0, can_undo).clicked() && can_undo {
                     self.undo();
                 }
             });
@@ -1531,7 +1629,123 @@ impl EditorState {
                 }
             }
         }
+        if self.tab == Tab::Crop {
+            self.crop_handles(ui, content);
+        }
         self.annotation_handles(ui);
+    }
+
+    /// On-canvas edge and corner crop handles when the Crop tab is active.
+    fn crop_handles(&mut self, ui: &mut egui::Ui, content: Rect) {
+        let p = ui.painter();
+        p.rect_stroke(content, CornerRadius::ZERO, Stroke::new(2.0, ACCENT_2), StrokeKind::Outside);
+        // Corner squares and edge midpoint pills
+        for pt in [content.left_top(), content.right_top(), content.right_bottom(), content.left_bottom()] {
+            let r = Rect::from_center_size(pt, Vec2::splat(10.0));
+            p.rect_filled(r, CornerRadius::same(2), Color32::WHITE);
+            p.rect_stroke(r, CornerRadius::same(2), Stroke::new(1.5, ACCENT), StrokeKind::Outside);
+        }
+        for (pt, sz) in [
+            (Pos2::new(content.min.x, content.center().y), Vec2::new(6.0, 24.0)),
+            (Pos2::new(content.max.x, content.center().y), Vec2::new(6.0, 24.0)),
+            (Pos2::new(content.center().x, content.min.y), Vec2::new(24.0, 6.0)),
+            (Pos2::new(content.center().x, content.max.y), Vec2::new(24.0, 6.0)),
+        ] {
+            let r = Rect::from_center_size(pt, sz);
+            p.rect_filled(r, CornerRadius::same(3), Color32::WHITE);
+            p.rect_stroke(r, CornerRadius::same(3), Stroke::new(1.0, ACCENT), StrokeKind::Outside);
+        }
+
+        let hit_edge = |pos: Pos2| -> Option<CropEdge> {
+            let near = |a: Pos2| (pos - a).length() <= 14.0;
+            if near(content.left_top()) {
+                return Some(CropEdge::TopLeft);
+            }
+            if near(content.right_top()) {
+                return Some(CropEdge::TopRight);
+            }
+            if near(content.right_bottom()) {
+                return Some(CropEdge::BottomRight);
+            }
+            if near(content.left_bottom()) {
+                return Some(CropEdge::BottomLeft);
+            }
+            let tol = 12.0;
+            if (pos.x - content.min.x).abs() <= tol && pos.y >= content.min.y - tol && pos.y <= content.max.y + tol {
+                return Some(CropEdge::Left);
+            }
+            if (pos.x - content.max.x).abs() <= tol && pos.y >= content.min.y - tol && pos.y <= content.max.y + tol {
+                return Some(CropEdge::Right);
+            }
+            if (pos.y - content.min.y).abs() <= tol && pos.x >= content.min.x - tol && pos.x <= content.max.x + tol {
+                return Some(CropEdge::Top);
+            }
+            if (pos.y - content.max.y).abs() <= tol && pos.x >= content.min.x - tol && pos.x <= content.max.x + tol {
+                return Some(CropEdge::Bottom);
+            }
+            None
+        };
+
+        let resp = ui.interact(content.expand(14.0), ui.id().with("crop-handles"), Sense::click_and_drag());
+        if let Some(pos) = resp.hover_pos() {
+            if let Some(edge) = self.crop_drag.as_ref().map(|d| d.edge).or_else(|| hit_edge(pos)) {
+                let icon = match edge {
+                    CropEdge::Left | CropEdge::Right => egui::CursorIcon::ResizeHorizontal,
+                    CropEdge::Top | CropEdge::Bottom => egui::CursorIcon::ResizeVertical,
+                    CropEdge::TopLeft | CropEdge::BottomRight => egui::CursorIcon::ResizeNwSe,
+                    CropEdge::TopRight | CropEdge::BottomLeft => egui::CursorIcon::ResizeNeSw,
+                };
+                ui.ctx().set_cursor_icon(icon);
+            }
+        }
+        if resp.drag_started() {
+            if let Some(pos) = resp.interact_pointer_pos() {
+                if let Some(edge) = hit_edge(pos) {
+                    self.crop_drag = Some(CropDrag {
+                        edge,
+                        p0: pos,
+                        start: self.project.config.crop,
+                        content_size: content.size(),
+                    });
+                }
+            }
+        }
+        if resp.dragged() {
+            if let (Some(d), Some(pos)) = (self.crop_drag.clone(), resp.interact_pointer_pos()) {
+                let dx = ((pos.x - d.p0.x) / d.content_size.x.max(1.0)) as f64 * d.start.width;
+                let dy = ((pos.y - d.p0.y) / d.content_size.y.max(1.0)) as f64 * d.start.height;
+                let (mut l, mut t, mut r, mut b) = (d.start.x, d.start.y, d.start.x + d.start.width, d.start.y + d.start.height);
+                const MIN: f64 = 0.1;
+                match d.edge {
+                    CropEdge::Left => l = (l + dx).clamp(0.0, r - MIN),
+                    CropEdge::Right => r = (r + dx).clamp(l + MIN, 1.0),
+                    CropEdge::Top => t = (t + dy).clamp(0.0, b - MIN),
+                    CropEdge::Bottom => b = (b + dy).clamp(t + MIN, 1.0),
+                    CropEdge::TopLeft => {
+                        l = (l + dx).clamp(0.0, r - MIN);
+                        t = (t + dy).clamp(0.0, b - MIN);
+                    }
+                    CropEdge::TopRight => {
+                        r = (r + dx).clamp(l + MIN, 1.0);
+                        t = (t + dy).clamp(0.0, b - MIN);
+                    }
+                    CropEdge::BottomLeft => {
+                        l = (l + dx).clamp(0.0, r - MIN);
+                        b = (b + dy).clamp(t + MIN, 1.0);
+                    }
+                    CropEdge::BottomRight => {
+                        r = (r + dx).clamp(l + MIN, 1.0);
+                        b = (b + dy).clamp(t + MIN, 1.0);
+                    }
+                }
+                self.edit_keyed(Some("crop-canvas"), |p| {
+                    p.config.crop = screencraft_core::project::Rect { x: l, y: t, width: (r - l).max(MIN), height: (b - t).max(MIN) };
+                });
+            }
+        }
+        if resp.drag_stopped() {
+            self.crop_drag = None;
+        }
     }
 
     /// Outline and drag handles of the selected annotation: the body moves it, the corner resizes

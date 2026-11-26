@@ -1,9 +1,6 @@
 use super::*;
 use crate::editor::Sel;
 
-#[derive(Default)]
-pub struct AudioState {}
-
 const CLICK_STYLES: [(&str, &str); 3] = [("soft", "Soft"), ("crisp", "Crisp"), ("classic", "Classic")];
 const KEY_STYLES: [(&str, &str); 3] = [("mechanical", "Mechanical"), ("soft", "Soft"), ("thock", "Thock")];
 

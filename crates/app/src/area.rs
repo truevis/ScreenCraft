@@ -99,7 +99,7 @@ impl Picker {
                         for w in corners.windows(2) {
                             painter.extend(egui::Shape::dashed_line(&[w[0], w[1]], Stroke::new(2.0, ACCENT_2), 6.0, 4.0));
                         }
-                        let label = format!("{} Ã— {}", sel.width().round(), sel.height().round());
+                        let label = format!("{} × {}", sel.width().round(), sel.height().round());
                         let tw = kit::text_width(ui, &label, 12.0) + 16.0;
                         let lr = Rect::from_min_size(Pos2::new(sel.min.x, (sel.min.y - 26.0).max(2.0)), Vec2::new(tw, 22.0));
                         painter.rect_filled(lr, CornerRadius::same(4), ACCENT);
@@ -110,7 +110,7 @@ impl Picker {
                     }
                 }
                 // hint
-                let msg = if ratio.is_some() { "Drag to select a vertical (9:16) area Â· Esc to cancel" } else { "Drag to select the area to record Â· Esc to cancel" };
+                let msg = if ratio.is_some() { "Drag to select a vertical (9:16) area · Esc to cancel" } else { "Drag to select the area to record · Esc to cancel" };
                 let tw = kit::text_width(ui, msg, 12.0) + 28.0;
                 let hr = Rect::from_min_size(Pos2::new(full.center().x - tw / 2.0, full.min.y + 24.0), Vec2::new(tw, 34.0));
                 painter.rect_filled(hr, CornerRadius::same(8), PANEL);
@@ -176,10 +176,17 @@ fn draw_rec_frame(ctx: &egui::Context, rect: PRect) {
     }
 }
 
-/// The click-through outline around `rect` (global logical points): `sel` the chosen area, `hl` a
-/// window being hovered in the menu, `rec` while recording.
-pub fn draw_frame(ctx: &egui::Context, rect: PRect, style: &'static str, displays: &[DisplayInfo]) {
-    if style == "rec" {
+/// Visual style for the screen outline overlay.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum FrameStyle {
+    Rec,
+    Highlight,
+    Selection,
+}
+
+/// The click-through outline around `rect` (global logical points).
+pub fn draw_frame(ctx: &egui::Context, rect: PRect, style: FrameStyle, displays: &[DisplayInfo]) {
+    if style == FrameStyle::Rec {
         return draw_rec_frame(ctx, rect);
     }
     let d = displays
@@ -204,9 +211,9 @@ pub fn draw_frame(ctx: &egui::Context, rect: PRect, style: &'static str, display
         let hole = Rect::from_min_size(Pos2::new(rect.x as f32 - dx, rect.y as f32 - dy), Vec2::new(rect.width as f32, rect.height as f32));
         let p = ui.painter();
         let dim = match style {
-            "hl" => Color32::TRANSPARENT,
-            "rec" => Color32::from_black_alpha(46),
-            _ => Color32::from_black_alpha(77),
+            FrameStyle::Highlight => Color32::TRANSPARENT,
+            FrameStyle::Rec => Color32::from_black_alpha(46),
+            FrameStyle::Selection => Color32::from_black_alpha(77),
         };
         for r in [
             Rect::from_min_max(full.min, Pos2::new(full.max.x, hole.min.y)),
@@ -217,11 +224,11 @@ pub fn draw_frame(ctx: &egui::Context, rect: PRect, style: &'static str, display
             p.rect_filled(r, 0.0, dim);
         }
         match style {
-            "hl" => {
+            FrameStyle::Highlight => {
                 p.rect_filled(hole, CornerRadius::same(6), Color32::from_rgba_unmultiplied(106, 174, 232, 36));
                 p.rect_stroke(hole, CornerRadius::same(6), Stroke::new(3.0, ACCENT_2), StrokeKind::Inside);
             }
-            "rec" => {
+            FrameStyle::Rec => {
                 let t = ui.input(|i| i.time);
                 let a = 0.55 + 0.45 * (0.5 + 0.5 * (t * std::f64::consts::TAU / 1.6).cos()) as f32;
                 p.rect_stroke(hole, CornerRadius::same(3), Stroke::new(2.0, alpha(DANGER, a)), StrokeKind::Inside);
@@ -231,7 +238,7 @@ pub fn draw_frame(ctx: &egui::Context, rect: PRect, style: &'static str, display
                 p.text(Pos2::new(tag.min.x + 22.0, tag.center().y), Align2::LEFT_CENTER, "REC", kit::font(11.0), Color32::WHITE);
                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(60));
             }
-            _ => {
+            FrameStyle::Selection => {
                 let corners = [hole.left_top(), hole.right_top(), hole.right_bottom(), hole.left_bottom(), hole.left_top()];
                 for w in corners.windows(2) {
                     p.extend(egui::Shape::dashed_line(&[w[0], w[1]], Stroke::new(2.0, ACCENT_2), 6.0, 4.0));

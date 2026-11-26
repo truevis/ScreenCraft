@@ -1,6 +1,6 @@
 use super::*;
 use crate::editor::Sel;
-use screencraft_core::project::ZoomRegion;
+use screencraft_core::project::{ZoomKind, ZoomRegion};
 
 fn zslider(
     st: &mut EditorState,
@@ -64,7 +64,19 @@ pub fn show(st: &mut EditorState, ui: &mut Ui) {
     zslider(st, ui, &ids, &format!("zl-{k}"), "Zoom level", z.zoom, (1.1, 5.0, 0.05), |v| format!("{v:.2}×"), |r, v| r.zoom = v);
     zslider(st, ui, &ids, &format!("ei-{k}"), "Ease in", z.ease_in_ms.unwrap_or(an.ease_in_ms) / 1000.0, (0.0, 1.5, 0.05), sec2, |r, v| r.ease_in_ms = Some(v * 1000.0));
     zslider(st, ui, &ids, &format!("eo-{k}"), "Ease out", z.ease_out_ms.unwrap_or(an.ease_out_ms) / 1000.0, (0.0, 1.5, 0.05), sec2, |r, v| r.ease_out_ms = Some(v * 1000.0));
-    kit::hint(ui, "The camera keeps the cursor centred and follows the text caret while you type.");
+    let mut kind = z.kind;
+    if kit::segmented(ui, Some("Target"), &[(ZoomKind::FollowCursor, "Follow cursor"), (ZoomKind::Manual, "Fixed point")], &mut kind) {
+        st.edit(|p| {
+            for r in p.scene.zooms.iter_mut().filter(|r| ids.contains(&r.id)) {
+                r.kind = kind;
+            }
+        });
+    }
+    if z.kind == ZoomKind::Manual {
+        kit::hint(ui, "Click or drag on the preview to set the fixed zoom point.");
+    } else {
+        kit::hint(ui, "The camera keeps the cursor centred and follows the text caret while you type.");
+    }
     ztoggle(st, ui, &ids, "Instant animation", Some("Apply the zoom immediately without easing."), z.instant, |r, v| r.instant = v);
     ztoggle(st, ui, &ids, "Disabled", None, z.is_disabled, |r, v| r.is_disabled = v);
     let label = if n > 1 { format!("Delete {n} zooms") } else { "Delete zoom".to_string() };

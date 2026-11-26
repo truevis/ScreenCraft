@@ -9,6 +9,7 @@ use crate::wallpapers::parse_color;
 use screencraft_core::project::{Annotation, Project};
 use screencraft_core::track::ComboMark;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use tiny_skia::{FillRule, LineCap, LineJoin, Mask, PathBuilder, Pixmap, PixmapPaint, Stroke, Transform};
 
@@ -135,22 +136,40 @@ fn hash_str(s: &str) -> u64 {
     h.finish()
 }
 
-/// Decode a `data:image/...;base64,` URL to RGBA (cached by content hash).
-pub fn decode_image(url: &str) -> Option<(u32, u32, Vec<u8>)> {
-    use base64::Engine;
-    let b64 = url.split_once("base64,")?.1;
-    let bytes = base64::engine::general_purpose::STANDARD.decode(b64.trim()).ok()?;
+/// Decode a `data:image/...;base64,` URL or relative/absolute image path to RGBA.
+pub fn decode_image(url: &str, base_dir: Option<&Path>) -> Option<(u32, u32, Vec<u8>)> {
+    let bytes = if url.starts_with("data:") {
+        use base64::Engine;
+        let b64 = url.split_once("base64,")?.1;
+        base64::engine::general_purpose::STANDARD.decode(b64.trim()).ok()?
+    } else {
+        let p = Path::new(url);
+        let full: PathBuf = if p.is_absolute() {
+            p.to_path_buf()
+        } else if let Some(dir) = base_dir {
+            dir.join(p)
+        } else {
+            return None;
+        };
+        std::fs::read(&full).ok()?
+    };
     let img = image::load_from_memory(&bytes).ok()?.to_rgba8();
     Some((img.width(), img.height(), img.into_raw()))
 }
 
-fn watermark_pixmap(url: &str) -> Option<Arc<Pixmap>> {
-    let key = hash_str(url);
+fn watermark_pixmap(url: &str, base_dir: Option<&Path>) -> Option<Arc<Pixmap>> {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    hash_str(url).hash(&mut h);
+    if !url.starts_with("data:") {
+        base_dir.map(|d| d.to_string_lossy().into_owned()).hash(&mut h);
+    }
+    let key = h.finish();
     let mut c = image_cache().lock().unwrap();
     if let Some(v) = c.get(&key) {
         return v.clone();
     }
-    let v = decode_image(url).and_then(|(w, h, rgba)| {
+    let v = decode_image(url, base_dir).and_then(|(w, h, rgba)| {
         let mut px = Pixmap::new(w, h)?;
         for (d, s) in px.data_mut().chunks_exact_mut(4).zip(rgba.chunks_exact(4)) {
             let a = s[3] as u32;
@@ -197,16 +216,17 @@ fn stroke(px: &mut Pixmap, path: &tiny_skia::Path, c: [f32; 4], w: f32, mask: Op
 fn annotations(p: &Project, cx: &Ctx, space: &str, bounds: &mut Vec<Bound>, effects: &mut Vec<Effect>) -> Option<Arc<Pixmap>> {
     let g = cx.g;
     let list = &p.scene.annotations;
+    let any_active = list.iter().any(|a| {
+        let a_space = if a.space.is_empty() { "screen" } else { a.space.as_str() };
+        a_space == space && g.t_src >= a.source_start_ms && g.t_src < a.source_end_ms && anim_k(a, g.t_src) > 0.003
+    });
+    if !any_active {
+        return None;
+    }
     let mut layer: Option<Pixmap> = None;
     let content = space == "content";
-    // content annotations are clipped to the rounded screen
-    let mask = if content {
-        let mut m = Mask::new(g.w as u32, g.h as u32)?;
-        m.fill_path(&skia::round_rect(g.sr[0], g.sr[1], g.sr[2], g.sr[3], g.screen_radius)?, FillRule::Winding, true, Transform::identity());
-        Some(m)
-    } else {
-        None
-    };
+    // content annotations are clipped to the rounded screen (allocated lazily only when a layer draws)
+    let mut mask: Option<Mask> = None;
     let to_x = |n: f64| g.sr[0] + ((n as f32 - g.view[0]) / g.view[2]) * g.sr[2];
     let to_y = |n: f64| g.sr[1] + ((n as f32 - g.view[1]) / g.view[3]) * g.sr[3];
     let zoom_k = g.zoom * (g.sr[2] / g.content_r[2].max(1.0));
@@ -229,16 +249,24 @@ fn annotations(p: &Project, cx: &Ctx, space: &str, bounds: &mut Vec<Bound>, effe
         let pop = if a.anim == "pop" { 0.85 + 0.15 * k } else { 1.0 };
         let ga = if a.anim == "pop" { (k * 1.6).min(1.0) } else { k };
         let col = color_of(if a.color.is_empty() { "#ffffff" } else { &a.color });
-        let ensure = |layer: &mut Option<Pixmap>| -> bool {
+        let ensure = |layer: &mut Option<Pixmap>, mask: &mut Option<Mask>| -> bool {
             if layer.is_none() {
                 *layer = pm(g.w, g.h);
+            }
+            if content && mask.is_none() {
+                if let Some(mut m) = Mask::new(g.w as u32, g.h as u32) {
+                    if let Some(rr) = skia::round_rect(g.sr[0], g.sr[1], g.sr[2], g.sr[3], g.screen_radius) {
+                        m.fill_path(&rr, FillRule::Winding, true, Transform::identity());
+                        *mask = Some(m);
+                    }
+                }
             }
             layer.is_some()
         };
         match a.kind.as_str() {
             "text" => {
                 let Some(font) = cx.font_bold.as_ref().or(cx.font.as_ref()) else { continue };
-                if !ensure(&mut layer) {
+                if !ensure(&mut layer, &mut mask) {
                     continue;
                 }
                 let px = layer.as_mut().unwrap();
@@ -277,7 +305,7 @@ fn annotations(p: &Project, cx: &Ctx, space: &str, bounds: &mut Vec<Bound>, effe
                 bounds.push(Bound { id: a.id.clone(), rect: [bx, by, bw, bh], arrow: None });
             }
             "box" | "ellipse" | "highlight" => {
-                if !ensure(&mut layer) {
+                if !ensure(&mut layer, &mut mask) {
                     continue;
                 }
                 let px = layer.as_mut().unwrap();
@@ -303,7 +331,7 @@ fn annotations(p: &Project, cx: &Ctx, space: &str, bounds: &mut Vec<Bound>, effe
                 bounds.push(Bound { id: a.id.clone(), rect: [bx, by, bw, bh], arrow: None });
             }
             "arrow" => {
-                if !ensure(&mut layer) {
+                if !ensure(&mut layer, &mut mask) {
                     continue;
                 }
                 let px = layer.as_mut().unwrap();
@@ -341,7 +369,7 @@ fn annotations(p: &Project, cx: &Ctx, space: &str, bounds: &mut Vec<Bound>, effe
                 bounds.push(Bound { id: a.id.clone(), rect: [x, y, w, h], arrow: None });
             }
             "spotlight" => {
-                if !ensure(&mut layer) {
+                if !ensure(&mut layer, &mut mask) {
                     continue;
                 }
                 let px = layer.as_mut().unwrap();
@@ -432,12 +460,12 @@ fn keys(p: &Project, cx: &Ctx, combos: &[ComboMark], px: &mut Option<Pixmap>) {
 
 // ---- watermark ------------------------------------------------------------------------------
 
-fn watermark(p: &Project, cx: &Ctx, px: &mut Option<Pixmap>) {
+fn watermark(p: &Project, cx: &Ctx, px: &mut Option<Pixmap>, base_dir: Option<&Path>) {
     let wm = &p.config.watermark;
     if !wm.enabled || wm.image.is_empty() {
         return;
     }
-    let Some(img) = watermark_pixmap(&wm.image) else { return };
+    let Some(img) = watermark_pixmap(&wm.image, base_dir) else { return };
     let g = cx.g;
     let (iw, ih) = (img.width() as f32, img.height() as f32);
     let w = (if wm.size > 0.0 { wm.size as f32 } else { 0.12 } * g.w).max(8.0);
@@ -554,6 +582,10 @@ fn subtitles(p: &Project, cx: &Ctx, px: &mut Option<Pixmap>) {
 
 /// Paint every CPU layer for one frame.
 pub fn build(p: &Project, g: &Geom, combos: &[ComboMark], out: (u32, u32), device_rect: R, screen_radius: f32) -> Layers {
+    build_in(p, g, combos, out, device_rect, screen_radius, None)
+}
+
+pub fn build_in(p: &Project, g: &Geom, combos: &[ComboMark], out: (u32, u32), device_rect: R, screen_radius: f32, base_dir: Option<&Path>) -> Layers {
     let s = g.h / 1080.0;
     let cx = Ctx { g, s, font: Font::at_weight(400.0), font_bold: Font::at_weight(600.0) };
     let mut layers = Layers::default();
@@ -562,7 +594,7 @@ pub fn build(p: &Project, g: &Geom, combos: &[ComboMark], out: (u32, u32), devic
         layers.content = annotations(p, &cx, "content", &mut layers.bounds, &mut layers.effects);
     }
     let mut top = annotations(p, &cx, "screen", &mut layers.bounds, &mut layers.effects).map(|a| Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()));
-    watermark(p, &cx, &mut top);
+    watermark(p, &cx, &mut top, base_dir);
     keys(p, &cx, combos, &mut top);
     // captions use the heavier weight
     let cx2 = Ctx { g, s, font: Font::at_weight(400.0), font_bold: Font::at_weight(800.0) };

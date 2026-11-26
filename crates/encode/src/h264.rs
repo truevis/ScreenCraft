@@ -119,4 +119,12 @@ impl H264Decoder {
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         return Err(Error::Codec("no H.264 decoder".into()));
     }
+
+    /// Flush internal decoder buffers before seeking to a new keyframe.
+    pub fn flush(&mut self) -> Result<()> {
+        #[cfg(target_os = "windows")]
+        return self.inner.flush();
+        #[cfg(not(target_os = "windows"))]
+        return Err(Error::Codec("flush not supported on this backend".into()));
+    }
 }

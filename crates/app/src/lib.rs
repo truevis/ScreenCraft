@@ -11,7 +11,6 @@ pub mod imgdata;
 pub mod kit;
 pub mod live;
 pub mod music;
-pub mod permissions;
 pub mod prefs;
 pub mod recorder;
 pub mod srt;

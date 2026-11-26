@@ -65,10 +65,13 @@ high-DPI screens. Original project: [MarshallNickolauson/ScreenCraft](https://gi
 - Microphone audio no longer crackles (capture timing jitter caused inserted silence and dropped samples).
 - Recording folders are named in local time, not UTC.
 - *Show in folder* after export opens the right folder.
+- Timeline audio waveform combines both system audio and microphone tracks (so microphone audio is visible even when system audio is silent).
 
 **Features**
 - **Projects menu:** New recording, Open project…, **Record more for this project**, and **Add a
   recording or video to this project** (joined onto the end, existing edits kept).
+- **Discard** button in the editor top bar with a confirmation dialog to permanently delete the open
+  recording and its saved project folder.
 - **Save** button, and a **full-screen preview** (`F11`, `Esc` to leave).
 - Music **ripples** when a clip is trimmed or deleted.
 - Defaults tuned for **professional app demos**: edge-to-edge video on black, subtitle-style
@@ -76,8 +79,9 @@ high-DPI screens. Original project: [MarshallNickolauson/ScreenCraft](https://gi
 - The built-in update check is removed.
 
 **Build tooling**
-- `scripts/build-windows.ps1` builds the app and the installer locally, with sccache and a `-Fast`
-  mode (about 20 s for a one-file change).
+- `scripts/build-windows.ps1` builds the app, packs the installer, and copies the executable to
+  `%LOCALAPPDATA%\Programs\ScreenCraft\ScreenCraft.exe`, with sccache and a `-Fast` mode (about
+  20 s for a one-file change).
 - A GitHub Actions workflow (`build-windows.yml`) builds the same installer and runs the tests.
 
 ### Install the Windows edition

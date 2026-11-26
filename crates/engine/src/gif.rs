@@ -47,7 +47,7 @@ pub fn export_gif(package: &Package, project: &Project, resolution: u32, out: &P
             }
         };
         upload_frames(&mut gpu, &frames);
-        let rgba = match render_frame(&mut gpu, project, &track, i, (w, h), 0.0) {
+        let rgba = match render_frame(&mut gpu, project, &track, i, (w, h), 0.0, Some(&package.dir)) {
             Ok(r) => r,
             Err(e) => {
                 result = Err(e);

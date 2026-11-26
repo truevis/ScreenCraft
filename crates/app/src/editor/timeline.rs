@@ -51,6 +51,7 @@ enum Drag {
     Scrub { was_playing: bool },
     Block { kind: Kind, id: String, mode: Mode, x0: f32, a0: f64, b0: f64, moved: bool, group: bool, music: (f64, f64, f64) },
     Bar { grab: f32 },
+    VBar { grab: f32 },
 }
 
 #[derive(Clone)]
@@ -61,6 +62,7 @@ struct Preview {
     /// Slot a dragged clip would drop into.
     drop: Option<usize>,
     music: Option<(f64, f64, f64)>,
+    snap_line: Option<f64>,
 }
 
 struct Block {
@@ -129,10 +131,10 @@ fn tools(st: &mut EditorState, ui: &mut egui::Ui) {
             if kit::icon_btn(ui, "split", "Split clip at playhead (S)").clicked() {
                 st.split_at_playhead();
             }
-            if kit::icon_btn(ui, "duplicate", "Duplicate selected clip (⌘D)").clicked() {
+            if kit::icon_btn(ui, "duplicate", "Duplicate selected clip (Ctrl+D)").clicked() {
                 st.duplicate_selected();
             }
-            if kit::icon_btn(ui, "trash", "Delete selected (⌫)").clicked() {
+            if kit::icon_btn(ui, "trash", "Delete selected (Del)").clicked() {
                 st.delete_selected();
             }
             if kit::pill(ui, None, "Auto zooms", false, true, false, None).on_hover_text("Regenerate zooms from clicks").clicked() {
@@ -150,6 +152,7 @@ fn tools(st: &mut EditorState, ui: &mut egui::Ui) {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Speed of the selected clip
+                let has_slice = matches!(&st.sel, Sel::Slice(_));
                 let speeds = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0, 8.0];
                 let labels: Vec<String> = speeds.iter().map(|s| format!("{s}×")).collect();
                 let cur_speed = match &st.sel {
@@ -158,7 +161,10 @@ fn tools(st: &mut EditorState, ui: &mut egui::Ui) {
                 };
                 let cur_label = labels.iter().zip(speeds).find(|(_, s)| (s - cur_speed).abs() < 0.01).map(|(l, _)| l.clone()).unwrap_or_else(|| format!("{}×", cur_speed));
                 let refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
-                if let Some(i) = kit::select(ui, "tl-speed", &cur_label, &refs, 70.0) {
+                let ir = ui.add_enabled_ui(has_slice, |ui| kit::select(ui, "tl-speed", &cur_label, &refs, 70.0));
+                let picked = ir.inner;
+                ir.response.on_disabled_hover_text("Select a clip to change speed");
+                if let Some(i) = picked {
                     if let Sel::Slice(id) = st.sel.clone() {
                         let v = speeds[i];
                         st.edit(|p| {
@@ -199,11 +205,28 @@ fn tools(st: &mut EditorState, ui: &mut egui::Ui) {
     let _ = r;
 }
 
-fn body(st: &mut EditorState, ui: &mut egui::Ui) {
-    let total = st.duration_ms().max(1.0);
-    let slices = st.project.scene.slices.clone();
-    let scene = st.project.scene.clone();
-    let sel_id = st.sel.clone();
+fn build_blocks(st: &mut EditorState, ctx: &egui::Context) -> (Vec<Block>, Vec<(f64, usize)>, usize, (bool, bool, bool, bool)) {
+    // Pre-warm music waveform decodes before borrowing `st.project` immutably.
+    let missing: Vec<String> = st
+        .project
+        .scene
+        .music_clips
+        .iter()
+        .filter(|c| !st.music_peaks.contains_key(&c.file))
+        .map(|c| c.file.clone())
+        .collect();
+    for file in missing {
+        st.peaks_for(&file, ctx);
+    }
+
+    let scene = &st.project.scene;
+    let slices = &scene.slices;
+    let empty_flags = (
+        scene.camera_layouts.is_empty(),
+        scene.annotations.is_empty(),
+        scene.subtitles.is_empty(),
+        scene.music_clips.is_empty(),
+    );
 
     // ---- build the blocks ------------------------------------------------------------
     let mut blocks: Vec<Block> = Vec::new();
@@ -221,7 +244,7 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
                 sj += 1;
             }
             let (first, last) = (&slices[si], &slices[sj - 1]);
-            let selected = matches!(&sel_id, Sel::Slice(id) if slices[si..sj].iter().any(|x| &x.id == id));
+            let selected = matches!(&st.sel, Sel::Slice(id) if slices[si..sj].iter().any(|x| &x.id == id));
             blocks.push(Block {
                 kind: Kind::Ramp,
                 id: first.id.clone(),
@@ -248,6 +271,15 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
         }
         let len = slice_len(s);
         let sped = (s.time_scale - 1.0).abs() > 1e-9 && !s.freeze;
+        let wave = if !s.disabled && !s.freeze {
+            st.waveform.as_ref().map(|p| {
+                let dur = (s.source_end_ms - s.source_start_ms).max(0.0);
+                let total_ms = p.len() as f64 * 20.0;
+                (p.clone(), s.source_start_ms, dur, total_ms)
+            })
+        } else {
+            None
+        };
         blocks.push(Block {
             kind: Kind::Clip,
             id: s.id.clone(),
@@ -257,13 +289,13 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
             lane: 0,
             label: if s.disabled { "Jump cut".into() } else if sped { String::new() } else if s.freeze { "Freeze".into() } else { "Clip".into() },
             sub: if sped && !s.disabled { None } else { Some(format!("{:.1}s", len / 1000.0)) },
-            sel: matches!(&sel_id, Sel::Slice(id) if id == &s.id),
+            sel: matches!(&st.sel, Sel::Slice(id) if id == &s.id),
             color: CLIP,
             text: if s.disabled { Color32::from_rgb(0xa9, 0xb4, 0xc8) } else { Color32::from_rgb(0x2d, 0x14, 0x05) },
             disabled: s.disabled,
             pill: if sped && !s.disabled { Some(x_text(s.time_scale)) } else { None },
             freeze: s.freeze,
-                wave: None,
+            wave,
         });
         if si > 0 && !s.disabled && !slices[si - 1].disabled {
             markers.push((acc, si));
@@ -273,7 +305,7 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
     }
     // zoom track
     for z in &scene.zooms {
-        for sp in ops::spans_out(&slices, z.source_start_ms, z.source_end_ms) {
+        for sp in ops::spans_out(slices, z.source_start_ms, z.source_end_ms) {
             if sp[1] - sp[0] < 1.0 {
                 continue;
             }
@@ -297,7 +329,7 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
         }
     }
     for r in &scene.camera_layouts {
-        for sp in ops::spans_out(&slices, r.source_start_ms, r.source_end_ms) {
+        for sp in ops::spans_out(slices, r.source_start_ms, r.source_end_ms) {
             if sp[1] - sp[0] < 1.0 {
                 continue;
             }
@@ -310,7 +342,7 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
                 lane: 0,
                 label: ops::layout_name(&r.layout).to_string(),
                 sub: None,
-                sel: matches!(&sel_id, Sel::Layout(id) if id == &r.id),
+                sel: matches!(&st.sel, Sel::Layout(id) if id == &r.id),
                 color: BLOCK_LAYOUT,
                 text: Color32::WHITE,
                 disabled: false,
@@ -323,7 +355,7 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
     // notes: greedy lanes so overlapping ones stack
     let mut items: Vec<(usize, [f64; 4])> = Vec::new();
     for (i, an) in scene.annotations.iter().enumerate() {
-        for sp in ops::spans_out(&slices, an.source_start_ms, an.source_end_ms) {
+        for sp in ops::spans_out(slices, an.source_start_ms, an.source_end_ms) {
             if sp[1] - sp[0] >= 1.0 {
                 items.push((i, sp));
             }
@@ -354,18 +386,18 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
             lane,
             label,
             sub: None,
-            sel: matches!(&sel_id, Sel::Annot(id) if id == &an.id),
+            sel: matches!(&st.sel, Sel::Annot(id) if id == &an.id),
             color,
             text: Color32::WHITE,
             disabled: false,
             pill: None,
             freeze: false,
-                wave: None,
+            wave: None,
         });
     }
     let note_lanes = lanes.len().max(1);
     for c in &scene.subtitles {
-        for sp in ops::spans_out(&slices, c.source_start_ms, c.source_end_ms) {
+        for sp in ops::spans_out(slices, c.source_start_ms, c.source_end_ms) {
             if sp[1] - sp[0] < 1.0 {
                 continue;
             }
@@ -399,15 +431,21 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
             lane: 0,
             label: format!("♪ {}", if c.name.is_empty() { "Music" } else { &c.name }),
             sub: None,
-            sel: matches!(&sel_id, Sel::Music(id) if id == &c.id),
+            sel: matches!(&st.sel, Sel::Music(id) if id == &c.id),
             color: BLOCK_MUSIC,
             text: Color32::WHITE,
             disabled: false,
             pill: None,
             freeze: false,
-            wave: st.peaks_for(&c.file, ui.ctx()).map(|p| (p, c.in_ms, c.dur_ms, c.file_dur_ms)),
+            wave: st.music_peaks.get(&c.file).map(|p| (p.clone(), c.in_ms, c.dur_ms, c.file_dur_ms)),
         });
     }
+    (blocks, markers, note_lanes, empty_flags)
+}
+
+fn body(st: &mut EditorState, ui: &mut egui::Ui) {
+    let total = st.duration_ms().max(1.0);
+    let (blocks, markers, note_lanes, (empty_layouts, empty_annots, empty_caps, empty_music)) = build_blocks(st, ui.ctx());
 
     // ---- geometry --------------------------------------------------------------------
     let track_h = |t: usize| -> f32 {
@@ -427,19 +465,24 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
     let content_h = y + 4.0;
 
     let avail = ui.available_rect_before_wrap();
-    let tracks_w = (avail.width() - LABEL_W).max(100.0);
     if st.timeline.fit_pending {
         st.timeline.zoom = 1.0;
         st.timeline.scroll_x = 0.0;
         st.timeline.fit_pending = false;
     }
     let zoom = st.timeline.zoom;
+    let scrollbar_h = if zoom > 1.0 { 12.0 } else { 0.0 };
+    let v_off = ui.ctx().memory_mut(|m| m.data.get_temp::<f32>(ui.id().with("tl-voff")).unwrap_or(0.0));
+    let visible_h = (avail.height() - scrollbar_h).max(1.0);
+    let max_v = (content_h - visible_h).max(0.0);
+    let mut v_off = v_off.clamp(0.0, max_v);
+    let vbar_w = if max_v > 0.0 { 12.0 } else { 0.0 };
+    let tracks_w = (avail.width() - LABEL_W - vbar_w).max(100.0);
     let inner_w = tracks_w * zoom as f32;
     let max_scroll = (inner_w - tracks_w).max(0.0);
     st.timeline.scroll_x = st.timeline.scroll_x.clamp(0.0, max_scroll);
 
-    let scrollbar_h = if zoom > 1.0 { 12.0 } else { 0.0 };
-    let body_rect = Rect::from_min_max(avail.min, Pos2::new(avail.max.x, avail.max.y - scrollbar_h));
+    let body_rect = Rect::from_min_max(avail.min, Pos2::new(avail.max.x - vbar_w, avail.max.y - scrollbar_h));
     let resp_all = ui.interact(body_rect, ui.id().with("tl-body"), Sense::click_and_drag());
 
     // wheel: cmd/ctrl zooms around the pointer; horizontal / shift scrolls
@@ -462,10 +505,6 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
     let scroll_x = st.timeline.scroll_x;
 
     let origin_y = body_rect.min.y; // vertical scrolling handled below
-    let v_off = ui.ctx().memory_mut(|m| m.data.get_temp::<f32>(ui.id().with("tl-voff")).unwrap_or(0.0));
-    let visible_h = body_rect.height();
-    let max_v = (content_h - visible_h).max(0.0);
-    let mut v_off = v_off.clamp(0.0, max_v);
     if resp_all.hovered() && max_v > 0.0 {
         let (scroll, mods) = ui.ctx().input(|i| (i.smooth_scroll_delta, i.modifiers));
         if !(mods.command || mods.ctrl || mods.shift) && scroll.y != 0.0 {
@@ -477,20 +516,28 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
     let tracks_left = body_rect.min.x + LABEL_W;
     let x_of = |t: f64| tracks_left - scroll_x + (t * ppm) as f32;
     let t_of = |x: f32| ((x - tracks_left + scroll_x) as f64 / ppm).clamp(0.0, total);
-    let ty = |t: usize| origin_y - v_off + track_y[t];
-    let painter = ui.painter().with_clip_rect(body_rect);
-    let tracks_clip = Rect::from_min_max(Pos2::new(tracks_left, body_rect.min.y), body_rect.max);
+    let ty = |t: usize, vo: f32| origin_y - vo + track_y[t];
+    let ruler_rect = Rect::from_min_max(body_rect.min, Pos2::new(body_rect.max.x, body_rect.min.y + RULER_H));
+    let label_clip = Rect::from_min_max(Pos2::new(body_rect.min.x, body_rect.min.y + RULER_H), Pos2::new(tracks_left, body_rect.max.y));
+    let tracks_clip = Rect::from_min_max(Pos2::new(tracks_left, body_rect.min.y + RULER_H), body_rect.max);
+    let ruler_clip = Rect::from_min_max(Pos2::new(tracks_left, body_rect.min.y), Pos2::new(body_rect.max.x, body_rect.min.y + RULER_H));
+    let lpainter = ui.painter().with_clip_rect(label_clip);
     let tpainter = ui.painter().with_clip_rect(tracks_clip);
+    let rpainter = ui.painter().with_clip_rect(ruler_clip);
 
     // labels
     for (i, name) in ["Video", "Zoom", "Camera", "Notes", "Captions", "Music"].iter().enumerate() {
-        let r = Rect::from_min_size(Pos2::new(body_rect.min.x, ty(i)), Vec2::new(LABEL_W, track_h(i)));
-        crate::kit::spaced_text(ui, Pos2::new(r.min.x, r.center().y - 6.0), &name.to_uppercase(), 10.0, MUTED, 1.2);
-        let _ = &painter;
+        let r = Rect::from_min_size(Pos2::new(body_rect.min.x, ty(i, v_off)), Vec2::new(LABEL_W, track_h(i)));
+        if r.max.y >= label_clip.min.y && r.min.y <= label_clip.max.y {
+            let mut job = egui::text::LayoutJob::default();
+            job.append(&name.to_uppercase(), 0.0, egui::TextFormat { font_id: kit::font(10.0), color: MUTED, extra_letter_spacing: 1.2, ..Default::default() });
+            let g = lpainter.layout_job(job);
+            lpainter.galley(Pos2::new(r.min.x, r.center().y - 6.0), g, MUTED);
+        }
     }
     // track backgrounds (faint 80px grid, like the web UI's repeating gradient)
     for t in 0..6 {
-        let r = Rect::from_min_size(Pos2::new(tracks_left, ty(t)), Vec2::new(inner_w, track_h(t)));
+        let r = Rect::from_min_size(Pos2::new(tracks_left, ty(t, v_off)), Vec2::new(inner_w, track_h(t)));
         let r = Rect::from_min_max(Pos2::new(r.min.x - scroll_x, r.min.y), Pos2::new(r.max.x - scroll_x, r.max.y));
         let mut x = r.min.x + 79.0;
         while x < r.max.x {
@@ -500,36 +547,37 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
             x += 80.0;
         }
     }
-    // ruler
+    // pinned ruler at the top of the viewport
+    ui.painter().rect_filled(ruler_rect, 0.0, PANEL);
     {
         let steps = [100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10_000.0, 15_000.0, 30_000.0, 60_000.0, 120_000.0, 300_000.0];
         let step = steps.iter().copied().find(|s| s * ppm >= 80.0).unwrap_or(300_000.0);
         let mut t = 0.0;
         while t <= total {
             let x = x_of(t);
-            if x > tracks_clip.min.x - 40.0 && x < tracks_clip.max.x + 40.0 {
-                tpainter.line_segment([Pos2::new(x, body_rect.min.y - v_off + 14.0), Pos2::new(x, body_rect.min.y - v_off + 20.0)], Stroke::new(1.0, Color32::from_rgb(0x35, 0x43, 0x5c)));
-                tpainter.text(Pos2::new(x, body_rect.min.y - v_off), Align2::CENTER_TOP, fmt_ruler(t), kit::font(10.5), MUTED);
+            if x > ruler_clip.min.x - 40.0 && x < ruler_clip.max.x + 40.0 {
+                rpainter.line_segment([Pos2::new(x, ruler_rect.min.y + 14.0), Pos2::new(x, ruler_rect.min.y + 20.0)], Stroke::new(1.0, Color32::from_rgb(0x35, 0x43, 0x5c)));
+                rpainter.text(Pos2::new(x, ruler_rect.min.y), Align2::CENTER_TOP, fmt_ruler(t), kit::font(10.5), MUTED);
             }
             t += step;
         }
     }
     // hints for empty tracks
     let hint = |t: usize, text: &str| {
-        tpainter.text(Pos2::new(tracks_left + 12.0, ty(t) + track_h(t) / 2.0), Align2::LEFT_CENTER, text, kit::font(11.5), MUTED);
+        tpainter.text(Pos2::new(tracks_left + 12.0, ty(t, v_off) + track_h(t) / 2.0), Align2::LEFT_CENTER, text, kit::font(11.5), MUTED);
     };
-    if scene.camera_layouts.is_empty() {
+    if empty_layouts {
         hint(2, "Change how the camera looks over time: add a layout from the Camera tab.");
     }
-    if scene.annotations.is_empty() {
+    if empty_annots {
         hint(3, "Text, arrows, blur and spotlight appear here: add them from the Annotate tab.");
     }
-    if scene.subtitles.is_empty() {
+    if empty_caps {
         hint(4, "Captions go here: add them from the Captions tab, or import an SRT.");
     }
     let mut add_music_rect = None;
-    if scene.music_clips.is_empty() {
-        let r = Rect::from_min_size(Pos2::new(tracks_left, ty(5)), Vec2::new(tracks_w, TRACK_H));
+    if empty_music {
+        let r = Rect::from_min_size(Pos2::new(tracks_left, ty(5, v_off)), Vec2::new(tracks_w, TRACK_H));
         add_music_rect = Some(r);
     }
 
@@ -538,7 +586,7 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
     let shift = ui.ctx().input(|i| i.modifiers.shift);
     let cmd = ui.ctx().input(|i| i.modifiers.command || i.modifiers.ctrl);
 
-    let rect_of = |b: &Block, pv: &Option<Preview>| -> Rect {
+    let rect_of = |b: &Block, pv: &Option<Preview>, vo: f32| -> Rect {
         let (mut a, mut bb) = (b.a, b.b);
         if let Some(p) = pv {
             if p.id == b.id && b.kind != Kind::Clip && b.kind != Kind::Ramp {
@@ -549,9 +597,9 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
         let x0 = x_of(a);
         let x1 = x_of(bb);
         let (top, h) = if b.kind == Kind::Annot {
-            (ty(3) + 4.0 + b.lane as f32 * 32.0, 28.0)
+            (ty(3, vo) + 4.0 + b.lane as f32 * 32.0, 28.0)
         } else {
-            (ty(b.track), TRACK_H)
+            (ty(b.track, vo), TRACK_H)
         };
         let min_w = match b.kind {
             Kind::Zoom | Kind::Layout | Kind::Annot | Kind::Caption | Kind::Music => 14.0,
@@ -562,10 +610,10 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
     };
 
     // hit test at pointer
-    let hit_block = |pos: Pos2, pv: &Option<Preview>| -> Option<(usize, Mode)> {
+    let hit_block = |pos: Pos2, pv: &Option<Preview>, vo: f32| -> Option<(usize, Mode)> {
         // topmost = last drawn
         blocks.iter().enumerate().rev().find_map(|(i, b)| {
-            let r = rect_of(b, pv);
+            let r = rect_of(b, pv, vo);
             if !r.expand2(Vec2::new(0.0, 0.0)).contains(pos) {
                 return None;
             }
@@ -580,9 +628,9 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
             Some((i, mode))
         })
     };
-    let hit_marker = |pos: Pos2| -> Option<usize> {
+    let hit_marker = |pos: Pos2, vo: f32| -> Option<usize> {
         markers.iter().find_map(|(t, si)| {
-            let c = Pos2::new(x_of(*t), ty(0) + TRACK_H / 2.0);
+            let c = Pos2::new(x_of(*t), ty(0, vo) + TRACK_H / 2.0);
             if (pos - c).length() <= 10.0 {
                 Some(*si)
             } else {
@@ -595,17 +643,17 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
     if resp_all.drag_started() || (resp_all.clicked() && st.timeline.drag.is_none()) {
         if let Some(pos) = pointer {
             let in_tracks = pos.x >= tracks_left;
-            let in_ruler = pos.y < body_rect.min.y - v_off + RULER_H + 1.0;
+            let in_ruler = pos.y < body_rect.min.y + RULER_H + 1.0;
             if !in_tracks {
                 // label column: nothing
-            } else if let Some(r) = add_music_rect.filter(|r| r.translate(Vec2::new(0.0, 0.0)).contains(pos) && pos.y > ty(5) - 1.0) {
+            } else if let Some(r) = add_music_rect.filter(|r| r.translate(Vec2::new(0.0, 0.0)).contains(pos) && pos.y > ty(5, v_off) - 1.0) {
                 let _ = r;
                 st.add_music();
-            } else if let (false, Some(si)) = (in_ruler, hit_marker(pos)) {
+            } else if let (false, Some(si)) = (in_ruler, hit_marker(pos, v_off)) {
                 let id = st.project.scene.slices[si].id.clone();
                 st.select(Sel::Slice(id));
                 st.tab = Tab::Pace;
-            } else if let (false, Some((bi, mode))) = (in_ruler, hit_block(pos, &preview_now)) {
+            } else if let (false, Some((bi, mode))) = (in_ruler, hit_block(pos, &preview_now, v_off)) {
                 let b = &blocks[bi];
                 let mut group = false;
                 // selection rules
@@ -627,7 +675,7 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
                                 st.multi = if ids.len() > 1 { ids } else { vec![] };
                             }
                             st.timeline.drag = None;
-                            return finish(st, ui, &blocks, v_off);
+                            return;
                         }
                         group = st.is_selected(&Sel::Zoom(b.id.clone())) && st.multi.len() > 1;
                         if !group {
@@ -660,7 +708,7 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
                                 st.multi = if ids.len() > 1 { ids } else { vec![] };
                             }
                             st.timeline.drag = None;
-                            return finish(st, ui, &blocks, v_off);
+                            return;
                         }
                         group = st.is_selected(&Sel::Caption(b.id.clone())) && st.multi.len() > 1;
                         if !group {
@@ -706,30 +754,144 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
                     if (pos.x - x0).abs() >= 3.0 || moved {
                         moved = true;
                         let d = (pos.x - x0) as f64 / ppm;
-                        let mut prev = Preview { id: id.clone(), a: a0, b: b0, drop: None, music: None };
+                        let snap_on = !ui.ctx().input(|i| i.modifiers.alt);
+                        let snap_tol = 8.0 / ppm.max(1e-6);
+                        let mut targets: Vec<f64> = Vec::with_capacity(blocks.len() * 2 + 3);
+                        if snap_on {
+                            targets.push(0.0);
+                            targets.push(total);
+                            targets.push(st.playhead_ms);
+                            for b in &blocks {
+                                if b.id != id {
+                                    targets.push(b.a);
+                                    targets.push(b.b);
+                                }
+                            }
+                        }
+                        let find_snap = |val: f64| -> Option<f64> {
+                            if !snap_on {
+                                return None;
+                            }
+                            targets
+                                .iter()
+                                .copied()
+                                .filter(|t| (*t - val).abs() <= snap_tol)
+                                .min_by(|a, b| (a - val).abs().partial_cmp(&(b - val).abs()).unwrap_or(std::cmp::Ordering::Equal))
+                        };
+                        let mut prev = Preview { id: id.clone(), a: a0, b: b0, drop: None, music: None, snap_line: None };
+                        let mut edge_src: Option<f64> = None;
                         match kind {
                             Kind::Zoom | Kind::Layout | Kind::Annot | Kind::Caption => {
-                                let (min_len, ) = (if kind == Kind::Zoom { 300.0 } else { 200.0 },);
+                                let min_len = if kind == Kind::Zoom { 300.0 } else { 200.0 };
                                 match mode {
                                     Mode::Move => {
                                         let w = b0 - a0;
-                                        prev.a = (a0 + d).clamp(0.0, (total - w).max(0.0));
+                                        let raw_a = (a0 + d).clamp(0.0, (total - w).max(0.0));
+                                        let raw_b = raw_a + w;
+                                        let sa = find_snap(raw_a);
+                                        let sb = find_snap(raw_b);
+                                        let snapped = match (sa, sb) {
+                                            (Some(ta), Some(tb)) => {
+                                                if (ta - raw_a).abs() <= (tb - raw_b).abs() {
+                                                    prev.snap_line = Some(ta);
+                                                    ta
+                                                } else {
+                                                    prev.snap_line = Some(tb);
+                                                    tb - w
+                                                }
+                                            }
+                                            (Some(ta), None) => {
+                                                prev.snap_line = Some(ta);
+                                                ta
+                                            }
+                                            (None, Some(tb)) => {
+                                                prev.snap_line = Some(tb);
+                                                tb - w
+                                            }
+                                            (None, None) => raw_a,
+                                        };
+                                        prev.a = snapped.clamp(0.0, (total - w).max(0.0));
                                         prev.b = prev.a + w;
                                     }
-                                    Mode::Left => prev.a = (a0 + d).clamp(0.0, b0 - min_len),
-                                    Mode::Right => prev.b = (b0 + d).clamp(a0 + min_len, total),
+                                    Mode::Left => {
+                                        let mut na = (a0 + d).clamp(0.0, b0 - min_len);
+                                        if let Some(t) = find_snap(na) {
+                                            if t <= b0 - min_len {
+                                                na = t.max(0.0);
+                                                prev.snap_line = Some(na);
+                                            }
+                                        }
+                                        prev.a = na;
+                                        edge_src = Some(ops::out_to_src(&st.project.scene.slices, prev.a).0);
+                                    }
+                                    Mode::Right => {
+                                        let mut nb = (b0 + d).clamp(a0 + min_len, total);
+                                        if let Some(t) = find_snap(nb) {
+                                            if t >= a0 + min_len {
+                                                nb = t.min(total);
+                                                prev.snap_line = Some(nb);
+                                            }
+                                        }
+                                        prev.b = nb;
+                                        edge_src = Some(ops::out_to_src(&st.project.scene.slices, (prev.b - 1.0).max(0.0)).0);
+                                    }
                                 }
                             }
                             Kind::Music => {
                                 let (o0, i0, d0) = music;
                                 let file_dur = st.project.scene.music_clips.iter().find(|c| c.id == id).map(|c| c.file_dur_ms).unwrap_or(0.0);
                                 let v = match mode {
-                                    Mode::Move => ((o0 + d).clamp(0.0, (total - 200.0).max(0.0)), i0, d0),
+                                    Mode::Move => {
+                                        let raw_o = (o0 + d).clamp(0.0, (total - 200.0).max(0.0));
+                                        let sa = find_snap(raw_o);
+                                        let sb = find_snap(raw_o + d0);
+                                        let o = match (sa, sb) {
+                                            (Some(ta), Some(tb)) => {
+                                                if (ta - raw_o).abs() <= (tb - (raw_o + d0)).abs() {
+                                                    prev.snap_line = Some(ta);
+                                                    ta
+                                                } else {
+                                                    prev.snap_line = Some(tb);
+                                                    tb - d0
+                                                }
+                                            }
+                                            (Some(ta), None) => {
+                                                prev.snap_line = Some(ta);
+                                                ta
+                                            }
+                                            (None, Some(tb)) => {
+                                                prev.snap_line = Some(tb);
+                                                tb - d0
+                                            }
+                                            (None, None) => raw_o,
+                                        };
+                                        (o.clamp(0.0, (total - 200.0).max(0.0)), i0, d0)
+                                    }
                                     Mode::Left => {
-                                        let delta = d.clamp((-i0).max(-o0), d0 - 200.0);
+                                        let min_d = (-i0).max(-o0);
+                                        let max_d = d0 - 200.0;
+                                        let mut delta = d.clamp(min_d, max_d);
+                                        if let Some(t) = find_snap(o0 + delta) {
+                                            let sd = (t - o0).clamp(min_d, max_d);
+                                            if (o0 + sd - t).abs() < 1.0 {
+                                                delta = sd;
+                                                prev.snap_line = Some(t);
+                                            }
+                                        }
                                         (o0 + delta, i0 + delta, d0 - delta)
                                     }
-                                    Mode::Right => (o0, i0, (d0 + d).clamp(200.0, (if file_dur > 0.0 { file_dur } else { d0 + i0 } - i0).max(200.0))),
+                                    Mode::Right => {
+                                        let max_dur = (if file_dur > 0.0 { file_dur } else { d0 + i0 } - i0).max(200.0);
+                                        let mut dur = (d0 + d).clamp(200.0, max_dur);
+                                        if let Some(t) = find_snap(o0 + dur) {
+                                            let sd = (t - o0).clamp(200.0, max_dur);
+                                            if (o0 + sd - t).abs() < 1.0 {
+                                                dur = sd;
+                                                prev.snap_line = Some(t);
+                                            }
+                                        }
+                                        (o0, i0, dur)
+                                    }
                                 };
                                 prev.music = Some(v);
                                 prev.a = v.0;
@@ -747,17 +909,44 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
                                             prev.b = b0 + d;
                                         }
                                         Mode::Left => {
-                                            let ns = (s.source_start_ms + d * s.time_scale).clamp(0.0, s.source_end_ms - 200.0);
+                                            let mut na = b0 - (s.source_end_ms - (s.source_start_ms + d * s.time_scale).clamp(0.0, s.source_end_ms - 200.0)) / s.time_scale;
+                                            if let Some(t) = find_snap(na) {
+                                                let cand_ns = (s.source_end_ms - (b0 - t) * s.time_scale).clamp(0.0, s.source_end_ms - 200.0);
+                                                let cand_na = b0 - (s.source_end_ms - cand_ns) / s.time_scale;
+                                                if (cand_na - t).abs() <= snap_tol {
+                                                    na = cand_na;
+                                                    prev.snap_line = Some(t);
+                                                }
+                                            }
+                                            let ns = (s.source_end_ms - (b0 - na) * s.time_scale).clamp(0.0, s.source_end_ms - 200.0);
                                             prev.a = b0 - (s.source_end_ms - ns) / s.time_scale;
+                                            edge_src = Some(ns);
                                         }
                                         Mode::Right => {
-                                            let ne = (s.source_end_ms + d * s.time_scale).clamp(s.source_start_ms + 200.0, st.project.media.duration_ms);
+                                            let dur = st.project.media.duration_ms;
+                                            let mut nb = a0 + ((s.source_end_ms + d * s.time_scale).clamp(s.source_start_ms + 200.0, dur) - s.source_start_ms) / s.time_scale;
+                                            if let Some(t) = find_snap(nb) {
+                                                let cand_ne = (s.source_start_ms + (t - a0) * s.time_scale).clamp(s.source_start_ms + 200.0, dur);
+                                                let cand_nb = a0 + (cand_ne - s.source_start_ms) / s.time_scale;
+                                                if (cand_nb - t).abs() <= snap_tol {
+                                                    nb = cand_nb;
+                                                    prev.snap_line = Some(t);
+                                                }
+                                            }
+                                            let ne = (s.source_start_ms + (nb - a0) * s.time_scale).clamp(s.source_start_ms + 200.0, dur);
                                             prev.b = a0 + (ne - s.source_start_ms) / s.time_scale;
+                                            edge_src = Some(ne);
                                         }
                                     }
                                 }
                             }
                             Kind::Ramp => {}
+                        }
+                        if matches!(mode, Mode::Left | Mode::Right) {
+                            if st.is_playing() {
+                                st.pause();
+                            }
+                            st.preview_override_src = edge_src;
                         }
                         st.timeline.preview = Some(prev);
                         st.timeline.drag = Some(Drag::Block { kind, id, mode, x0, a0, b0, moved, group, music });
@@ -769,12 +958,20 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
                     let x = (pos.x - tracks_left - grab).clamp(0.0, track - thumb_w);
                     st.timeline.scroll_x = (x / (track - thumb_w).max(1.0) * max_scroll).clamp(0.0, max_scroll);
                 }
+                Drag::VBar { grab } => {
+                    let track_h = body_rect.height();
+                    let thumb_h = (track_h * track_h / content_h.max(1.0)).max(24.0);
+                    let y = (pos.y - body_rect.min.y - grab).clamp(0.0, (track_h - thumb_h).max(1.0));
+                    v_off = (y / (track_h - thumb_h).max(1.0) * max_v).clamp(0.0, max_v);
+                    ui.ctx().memory_mut(|m| m.data.insert_temp(ui.id().with("tl-voff"), v_off));
+                }
             }
         }
     }
 
     let released = resp_all.drag_stopped() || (resp_all.clicked() && st.timeline.drag.is_some());
     if released {
+        st.preview_override_src = None;
         if let Some(drag) = st.timeline.drag.take() {
             let prev = st.timeline.preview.take();
             match drag {
@@ -783,7 +980,7 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
                         st.play();
                     }
                 }
-                Drag::Bar { .. } => {}
+                Drag::Bar { .. } | Drag::VBar { .. } => {}
                 Drag::Block { kind, id, mode, moved, group, a0, b0, .. } => {
                     if !moved {
                         // a click on a clip seeks there
@@ -804,7 +1001,7 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
     // ---- paint blocks -----------------------------------------------------------------
     let pv = st.timeline.preview.clone();
     for b in &blocks {
-        let mut r = rect_of(b, &pv);
+        let mut r = rect_of(b, &pv, v_off);
         let mut dragging = false;
         if let Some(p) = &pv {
             if p.id == b.id && matches!(b.kind, Kind::Clip) {
@@ -826,14 +1023,20 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
                 }
             }
         }
-        if r.max.x < tracks_clip.min.x || r.min.x > tracks_clip.max.x || r.max.y < body_rect.min.y || r.min.y > body_rect.max.y {
+        if r.max.x < tracks_clip.min.x || r.min.x > tracks_clip.max.x || r.max.y < tracks_clip.min.y || r.min.y > tracks_clip.max.y {
             continue;
         }
         paint_block(ui, &tpainter, b, r, dragging);
     }
+    if let Some(snap_t) = pv.as_ref().and_then(|p| p.snap_line) {
+        let sx = x_of(snap_t);
+        if sx >= tracks_clip.min.x && sx <= tracks_clip.max.x {
+            tpainter.line_segment([Pos2::new(sx, tracks_clip.min.y), Pos2::new(sx, tracks_clip.max.y)], Stroke::new(1.0, alpha(ACCENT_2, 0.75)));
+        }
+    }
     // transition markers
     for (t, si) in &markers {
-        let c = Pos2::new(x_of(*t), ty(0) + TRACK_H / 2.0);
+        let c = Pos2::new(x_of(*t), ty(0, v_off) + TRACK_H / 2.0);
         if c.x < tracks_clip.min.x - 12.0 || c.x > tracks_clip.max.x + 12.0 {
             continue;
         }
@@ -844,7 +1047,7 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
         tpainter.text(c, Align2::CENTER_CENTER, if has { "◐" } else { "+" }, kit::font(10.0), Color32::from_rgb(0x22, 0x22, 0x22));
     }
     if let Some(r) = add_music_rect {
-        let r = Rect::from_min_max(Pos2::new(r.min.x, ty(5)), Pos2::new(r.max.x, ty(5) + TRACK_H));
+        let r = Rect::from_min_max(Pos2::new(r.min.x, ty(5, v_off)), Pos2::new(r.max.x, ty(5, v_off) + TRACK_H));
         let hov = ui.rect_contains_pointer(r);
         let col = if hov { BLOCK_MUSIC } else { LINE_2 };
         if hov {
@@ -856,16 +1059,46 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
         tpainter.text(r.center(), Align2::CENTER_CENTER, "+ Add music", kit::font(13.0), if hov { Color32::from_rgb(0xd3, 0xf5, 0xe5) } else { MUTED });
     }
 
-    // playhead
+    // playhead (cap pinned in the ruler; line clipped to the tracks area)
     let px = x_of(st.playhead_ms);
-    if px >= tracks_clip.min.x - 8.0 && px <= tracks_clip.max.x + 8.0 {
-        let top = body_rect.min.y - v_off;
-        tpainter.rect_filled(Rect::from_min_max(Pos2::new(px - 1.0, top + 20.0), Pos2::new(px + 1.0, top + content_h)), 0.0, ACCENT_2);
-        tpainter.rect_filled(Rect::from_min_size(Pos2::new(px - 6.0, top + 9.0), Vec2::splat(12.0)), CornerRadius { nw: 3, ne: 3, sw: 6, se: 6 }, ACCENT_2);
+    if px >= ruler_clip.min.x - 8.0 && px <= ruler_clip.max.x + 8.0 {
+        let top = ruler_rect.min.y;
+        let bot = (origin_y - v_off + content_h).min(tracks_clip.max.y);
+        if bot > tracks_clip.min.y {
+            tpainter.rect_filled(Rect::from_min_max(Pos2::new(px - 1.0, tracks_clip.min.y), Pos2::new(px + 1.0, bot)), 0.0, ACCENT_2);
+        }
+        rpainter.rect_filled(Rect::from_min_size(Pos2::new(px - 6.0, top + 9.0), Vec2::splat(12.0)), CornerRadius { nw: 3, ne: 3, sw: 6, se: 6 }, ACCENT_2);
     }
     // keep the playhead visible while playing a zoomed-in timeline
     if st.is_playing() && zoom > 1.0 && (px > tracks_clip.max.x - 20.0 || px < tracks_clip.min.x) {
         st.timeline.scroll_x = ((st.playhead_ms * ppm) as f32 - tracks_w * 0.2).clamp(0.0, max_scroll);
+    }
+
+    // vertical scrollbar when tracks overflow
+    if vbar_w > 0.0 {
+        let track_h = body_rect.height();
+        let bar = Rect::from_min_size(Pos2::new(body_rect.max.x + 2.0, body_rect.min.y), Vec2::new(8.0, track_h));
+        let thumb_h = (track_h * track_h / content_h.max(1.0)).max(24.0);
+        let y = bar.min.y + v_off / max_v.max(1.0) * (track_h - thumb_h);
+        let thumb = Rect::from_min_size(Pos2::new(bar.min.x, y), Vec2::new(8.0, thumb_h));
+        let r = ui.interact(thumb.expand2(Vec2::new(4.0, 0.0)), ui.id().with("tl-vbar"), Sense::drag());
+        if r.drag_started() {
+            if let Some(p) = r.interact_pointer_pos() {
+                st.timeline.drag = Some(Drag::VBar { grab: p.y - thumb.min.y });
+            }
+        }
+        if r.dragged() {
+            if let Some(p) = r.interact_pointer_pos() {
+                let grab = if let Some(Drag::VBar { grab }) = st.timeline.drag { grab } else { thumb_h / 2.0 };
+                let y = (p.y - bar.min.y - grab).clamp(0.0, (track_h - thumb_h).max(1.0));
+                v_off = (y / (track_h - thumb_h).max(1.0) * max_v).clamp(0.0, max_v);
+                ui.ctx().memory_mut(|m| m.data.insert_temp(ui.id().with("tl-voff"), v_off));
+            }
+        }
+        if r.drag_stopped() {
+            st.timeline.drag = None;
+        }
+        ui.painter().rect_filled(thumb, CornerRadius::same(4), Color32::from_rgb(0x2b, 0x38, 0x50));
     }
 
     // horizontal scrollbar when zoomed
@@ -896,7 +1129,7 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
 
     // cursor feedback on trim handles
     if let Some(h) = resp_all.hover_pos() {
-        if let Some((_, mode)) = hit_block(h, &pv) {
+        if let Some((_, mode)) = hit_block(h, &pv, v_off) {
             if mode != Mode::Move {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
             } else {
@@ -909,7 +1142,27 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
     }
 }
 
-fn finish(_st: &mut EditorState, _ui: &mut egui::Ui, _b: &[Block], _v: f32) {}
+fn paint_waveform(clip: &egui::Painter, r: Rect, inner: Rect, peaks: &[f32], in_ms: f64, dur_ms: f64, file_ms: f64, height_frac: f32, color: Color32) {
+    if peaks.is_empty() || r.width() <= 0.0 {
+        return;
+    }
+    let total = peaks.len() as f64;
+    let fd = if file_ms > 0.0 { file_ms } else { in_ms + dur_ms }.max(1.0);
+    let (i0, i1) = (in_ms / fd * total, (in_ms + dur_ms) / fd * total);
+    let mid = r.center().y;
+    let mut x = r.min.x.max(inner.min.x - HANDLE_W).floor();
+    let end = r.max.x.min(inner.max.x + HANDLE_W);
+    while x < end {
+        let f0 = (x - r.min.x) as f64 / r.width() as f64;
+        let f1 = (x + 1.0 - r.min.x) as f64 / r.width() as f64;
+        let a = (i0 + (i1 - i0) * f0).floor().max(0.0) as usize;
+        let bb = ((i0 + (i1 - i0) * f1).floor() as usize).max(a + 1);
+        let m = (a..bb.min(peaks.len())).map(|i| peaks[i]).fold(0.0f32, f32::max);
+        let bar = (m * r.height() * height_frac).max(1.0);
+        clip.rect_filled(Rect::from_min_max(Pos2::new(x, mid - bar / 2.0), Pos2::new(x + 1.0, mid + bar / 2.0)), 0.0, color);
+        x += 1.0;
+    }
+}
 
 fn paint_block(ui: &egui::Ui, p: &egui::Painter, b: &Block, r: Rect, dragging: bool) {
     let cr = CornerRadius::same(6);
@@ -957,6 +1210,11 @@ fn paint_block(ui: &egui::Ui, p: &egui::Painter, b: &Block, r: Rect, dragging: b
         let inner = Rect::from_min_max(Pos2::new(r.min.x + HANDLE_W, r.min.y), Pos2::new(r.max.x - HANDLE_W, r.max.y));
         let ic = p.with_clip_rect(inner);
         let cx = r.center().x;
+        if b.kind == Kind::Clip {
+            if let Some((peaks, in_ms, dur_ms, file_ms)) = &b.wave {
+                paint_waveform(&ic, r, inner, peaks, *in_ms, *dur_ms, *file_ms, 0.78, alpha(b.text, 0.28));
+            }
+        }
         if let Some(pill) = &b.pill {
             let w = kit::text_width(ui, pill, 11.0) + 18.0;
             let pr = Rect::from_center_size(r.center(), Vec2::new(w.max(34.0), 20.0));
@@ -965,21 +1223,7 @@ fn paint_block(ui: &egui::Ui, p: &egui::Painter, b: &Block, r: Rect, dragging: b
             ic.text(pr.center(), Align2::CENTER_CENTER, pill, kit::font(11.0), b.text);
         } else if b.kind == Kind::Music {
             if let Some((peaks, in_ms, dur_ms, file_ms)) = &b.wave {
-                let total = peaks.len() as f64;
-                let fd = if *file_ms > 0.0 { *file_ms } else { in_ms + dur_ms };
-                let (i0, i1) = (in_ms / fd * total, (in_ms + dur_ms) / fd * total);
-                let mid = r.center().y;
-                let mut x = r.min.x.max(inner.min.x - HANDLE_W).floor();
-                while x < r.max.x.min(inner.max.x + HANDLE_W) {
-                    let f0 = (x - r.min.x) as f64 / r.width() as f64;
-                    let f1 = (x + 1.0 - r.min.x) as f64 / r.width() as f64;
-                    let a = (i0 + (i1 - i0) * f0).floor().max(0.0) as usize;
-                    let bb = ((i0 + (i1 - i0) * f1).floor() as usize).max(a + 1);
-                    let m = (a..bb.min(peaks.len())).map(|i| peaks[i]).fold(0.0f32, f32::max);
-                    let bar = (m * r.height() * 0.9).max(1.0);
-                    clip.rect_filled(Rect::from_min_max(Pos2::new(x, mid - bar / 2.0), Pos2::new(x + 1.0, mid + bar / 2.0)), 0.0, Color32::from_white_alpha(191));
-                    x += 1.0;
-                }
+                paint_waveform(&clip, r, inner, peaks, *in_ms, *dur_ms, *file_ms, 0.9, Color32::from_white_alpha(191));
             }
             let mname = b.label.clone();
             let w = kit::text_width(ui, &mname, 11.0) + 12.0;

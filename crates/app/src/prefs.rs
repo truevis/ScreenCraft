@@ -24,6 +24,7 @@ pub struct Prefs {
     /// Where the idle recorder bar was last left: its bottom-centre in desktop points.
     /// `None` (first run) centres it on the main display.
     pub bar_anchor: Option<[f32; 2]>,
+    pub global_hotkey: bool,
 }
 
 impl Default for Prefs {
@@ -44,6 +45,7 @@ impl Default for Prefs {
             camera_label: String::new(),
             export_dir: None,
             bar_anchor: None,
+            global_hotkey: true,
         }
     }
 }

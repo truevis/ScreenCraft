@@ -13,5 +13,5 @@ pub mod gpu;
 pub mod scene;
 pub mod wallpapers;
 
-pub use gpu::{Compositor, Slot};
-pub use scene::{build_scene, build_scene_with, CamOverride, CameraDraw, content_aspect, content_rect, output_size, plain_scene, BackgroundKind, CursorDraw, Ripple, Scene, ASPECTS};
+pub use gpu::{Compositor, ReadbackTicket, Slot};
+pub use scene::{build_scene, build_scene_in, build_scene_with, CamOverride, CameraDraw, content_aspect, content_rect, output_size, plain_scene, BackgroundKind, CursorDraw, Ripple, Scene, ASPECTS};

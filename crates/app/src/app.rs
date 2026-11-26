@@ -3,7 +3,7 @@
 
 use crate::editor::EditorState;
 use crate::prefs::Prefs;
-use crate::recorder::{Action, Evt, Mode, Phase, Recorder, BAR_H, BAR_W};
+use crate::recorder::{Action, Evt, Mode, Phase, Recorder, BAR_H};
 use eframe::egui::{self, Color32, Pos2, Vec2, ViewportBuilder, ViewportCommand, ViewportId};
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
@@ -26,6 +26,7 @@ pub struct App {
     render_state: eframe::egui_wgpu::RenderState,
     _hotkeys: Option<GlobalHotKeyManager>,
     hotkey_id: Option<u32>,
+    hotkey_enabled: bool,
     /// Developer hooks: open a package, seek and save a screenshot, then quit.
     shot: Option<Shot>,
     /// `SCREENCRAFT_AUTORECORD=<seconds>`: record the main display, stop, report, quit.
@@ -36,7 +37,6 @@ pub struct App {
     /// The window size last asked for, so the bar is only moved when something changed.
     applied: Option<(Vec2, Phase, bool)>,
     area_picker: Option<crate::area::Picker>,
-    show_permissions: bool,
     /// Highlight outline on the screen while hovering a window in the menu.
     hover_window: Option<screencraft_capture::WindowInfo>,
     compressor: Option<crate::compressor::Compressor>,
@@ -48,7 +48,7 @@ pub struct App {
     /// Native window handle (Windows), to keep the recording bar out of the capture.
     native_window: Option<isize>,
     /// "Record more for this project": the next recording is added to the end of this project.
-    append_target: Option<std::path::PathBuf>,
+    append_target: Option<(std::path::PathBuf, String)>,
     /// Footage being added to a project (runs on its own thread).
     append_job: Option<AppendJob>,
 }
@@ -92,9 +92,7 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         crate::theme::install(&cc.egui_ctx);
         let render_state = cc.wgpu_render_state.clone().expect("the wgpu renderer is required");
-        let mut app = Self::build(&cc.egui_ctx, render_state, true);
-        app.show_permissions = cfg!(target_os = "macos") && !app.rec.permissions.screen;
-        app
+        Self::build(&cc.egui_ctx, render_state, true)
     }
 
     /// Without a window or global shortcuts: for the screenshot tool and tests.
@@ -171,20 +169,45 @@ impl App {
         }
     }
 
+    fn sync_hotkey(&mut self) {
+        if self.hotkey_enabled == self.prefs.global_hotkey {
+            return;
+        }
+        self.hotkey_enabled = self.prefs.global_hotkey;
+        let mods = if cfg!(target_os = "macos") { Modifiers::SUPER | Modifiers::SHIFT } else { Modifiers::CONTROL | Modifiers::SHIFT };
+        let hk = HotKey::new(Some(mods), Code::KeyR);
+        if let Some(mgr) = &self._hotkeys {
+            if self.prefs.global_hotkey {
+                let id = hk.id();
+                if mgr.register(hk).is_ok() {
+                    self.hotkey_id = Some(id);
+                }
+            } else {
+                let _ = mgr.unregister(hk);
+                self.hotkey_id = None;
+            }
+        }
+    }
+
     fn build(ctx: &egui::Context, render_state: eframe::egui_wgpu::RenderState, hotkeys: bool) -> Self {
         let prefs = Prefs::load();
         let (mgr, id) = match if hotkeys { GlobalHotKeyManager::new() } else { Err(global_hotkey::Error::AlreadyRegistered(HotKey::new(None, Code::KeyA))) } {
             Ok(m) => {
-                let mods = if cfg!(target_os = "macos") { Modifiers::SUPER | Modifiers::SHIFT } else { Modifiers::CONTROL | Modifiers::SHIFT };
-                let hk = HotKey::new(Some(mods), Code::KeyR);
-                let id = hk.id();
-                let ok = m.register(hk).is_ok();
-                (Some(m), ok.then_some(id))
+                let id = if prefs.global_hotkey {
+                    let mods = if cfg!(target_os = "macos") { Modifiers::SUPER | Modifiers::SHIFT } else { Modifiers::CONTROL | Modifiers::SHIFT };
+                    let hk = HotKey::new(Some(mods), Code::KeyR);
+                    let id = hk.id();
+                    m.register(hk).is_ok().then_some(id)
+                } else {
+                    None
+                };
+                (Some(m), id)
             }
             Err(_) => (None, None),
         };
         let mut rec = Recorder::new(ctx, &prefs);
         rec.permissions = screencraft_capture::permissions();
+        let hotkey_enabled = prefs.global_hotkey;
         let mut app = Self {
             rec,
             prefs,
@@ -193,12 +216,12 @@ impl App {
             render_state,
             _hotkeys: mgr,
             hotkey_id: id,
+            hotkey_enabled,
             autorecord: std::env::var("SCREENCRAFT_AUTORECORD").ok().and_then(|v| v.parse().ok()),
             autorecord_started: false,
             headless: false,
             applied: None,
             area_picker: None,
-            show_permissions: false,
             hover_window: None,
             compressor: None,
             pending_open: Vec::new(),
@@ -265,11 +288,6 @@ impl App {
         if self.rec.phase != Phase::Idle {
             return;
         }
-        // a talking-head video never looks at the screen
-        if self.rec.mode != Mode::Camera && !self.rec.permissions.screen {
-            self.show_permissions = true;
-            return;
-        }
         if self.rec.mode == Mode::Camera && !self.prefs.camera {
             self.rec.show_error("Turn the camera on to record a talking-head video.");
             return;
@@ -307,10 +325,9 @@ impl App {
     /// while footage is being added.
     fn draw_append(&mut self, ctx: &egui::Context) {
         use std::sync::atomic::Ordering;
-        if let Some(target) = self.append_target.clone() {
+        if let Some((target, name)) = self.append_target.clone() {
             let active = matches!(self.rec.phase, Phase::Idle | Phase::Starting | Phase::Countdown | Phase::Recording | Phase::Confirm);
             if let (true, true, Some(o)) = (self.editors.is_empty(), active, ctx.input(|i| i.viewport().outer_rect)) {
-                let name = Package::open(&target).load_project().map(|p| p.name).unwrap_or_default();
                 let size = Vec2::new(o.width().max(380.0), 34.0);
                 let builder = ViewportBuilder::default()
                     .with_title("sc-append-note")
@@ -440,7 +457,7 @@ impl App {
                             let _ = std::fs::remove_dir_all(&f.package.dir);
                         }
                         Ok(f) => match self.append_target.take() {
-                            Some(target) => self.append_job = Some(AppendJob::start(target, f.package.dir.clone(), true)),
+                            Some((target, _)) => self.append_job = Some(AppendJob::start(target, f.package.dir.clone(), true)),
                             None => {
                                 self.fresh.push(f.package.dir.clone());
                                 self.pending_open.push(f.package.dir.clone());
@@ -490,7 +507,6 @@ impl App {
             Action::OpenProject(dir) => self.pending_open.push(dir),
             Action::PickArea => self.pick_area(ctx),
             Action::HoverWindow(w) => self.hover_window = w,
-            Action::ShowPermissions => self.show_permissions = true,
         }
     }
 
@@ -667,6 +683,7 @@ impl App {
     pub fn draw(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.dev_screenshot(&ctx);
+        self.sync_hotkey();
         self.rec.parked = !self.editors.is_empty();
         self.rec.refresh(&self.prefs);
         if let Some(secs) = self.autorecord {
@@ -694,12 +711,14 @@ impl App {
         if self.headless {
             // screenshots and tests: the first editor fills the window, else the bar is drawn on a backdrop
             if let Some(e) = self.editors.first_mut() {
-                let _ = e.ed.ui(ui);
+                e.ed.ui(ui, &mut self.prefs);
                 return;
             }
             let rect = ui.max_rect();
             ui.painter().rect_filled(rect, 0.0, crate::theme::BG);
-            let bar_area = egui::Rect::from_min_size(Pos2::new(rect.center().x - BAR_W.min(rect.width() - 24.0) / 2.0, rect.max.y - 90.0 - BAR_H - if self.rec.menu.is_some() { 360.0 } else { 0.0 }), Vec2::new(BAR_W.min(rect.width() - 24.0), BAR_H + if self.rec.menu.is_some() { 360.0 } else { 0.0 }));
+            let w = self.rec.bar_width().min(rect.width() - 24.0);
+            let menu_h = if self.rec.menu.is_some() { 360.0 } else { 0.0 };
+            let bar_area = egui::Rect::from_min_size(Pos2::new(rect.center().x - w / 2.0, rect.max.y - 90.0 - BAR_H - menu_h), Vec2::new(w, BAR_H + menu_h));
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(bar_area));
             let a = self.rec.show(&mut child, &mut self.prefs);
             self.handle_action(&ctx, a);
@@ -723,7 +742,7 @@ impl App {
             {
                 let ed = &mut self.editors[i].ed;
                 ctx.show_viewport_immediate(id, builder, |ui, _class| {
-                    ed.ui(ui);
+                    ed.ui(ui, &mut self.prefs);
                     if ui.ctx().input(|i| i.viewport().close_requested()) {
                         if ed.dirty {
                             ui.ctx().send_viewport_cmd(ViewportCommand::CancelClose);
@@ -743,9 +762,10 @@ impl App {
             if let Some(req) = self.editors[i].ed.footage_request.take() {
                 use crate::editor::FootageRequest;
                 let dir = self.editors[i].ed.package.dir.clone();
+                let name = self.editors[i].ed.project.name.clone();
                 match req {
                     FootageRequest::NewRecording => self.append_target = None,
-                    FootageRequest::RecordMore => self.append_target = Some(dir),
+                    FootageRequest::RecordMore => self.append_target = Some((dir, name)),
                     FootageRequest::Add(p) => self.append_job = Some(AppendJob::start(dir, p, false)),
                 }
                 close = true;
@@ -777,7 +797,24 @@ impl App {
                     }
                 }
             }
-            if close {
+            if self.editors[i].ed.discard_request {
+                let mut w = self.editors.remove(i);
+                let dir = w.ed.package.dir.clone();
+                w.ed.pause();
+                w.ed.export.cancel();
+                drop(w);
+                self.fresh.retain(|d| *d != dir);
+                if self.append_target.as_ref().is_some_and(|(d, _)| *d == dir) {
+                    self.append_target = None;
+                }
+                if let Err(e) = remove_package_dir(&dir) {
+                    crate::applog::line(&format!("could not discard {}: {e}", dir.display()));
+                    self.rec.show_error(format!("Couldn't delete the recording: {e}"));
+                } else {
+                    crate::applog::line(&format!("discarded {}", dir.display()));
+                }
+                ctx.request_repaint();
+            } else if close {
                 let mut w = self.editors.remove(i);
                 w.ed.pause();
                 w.ed.save_now();
@@ -826,15 +863,15 @@ impl App {
                 }
             }
         }
-        let outline: Option<(PRect, &'static str)> = match (self.rec.phase, self.rec.mode, self.rec.area, &self.hover_window) {
-            (Phase::Recording | Phase::Countdown | Phase::Starting | Phase::Confirm, Mode::Area, Some(a), _) => Some((a, "rec")),
+        let outline: Option<(PRect, crate::area::FrameStyle)> = match (self.rec.phase, self.rec.mode, self.rec.area, &self.hover_window) {
+            (Phase::Recording | Phase::Countdown | Phase::Starting | Phase::Confirm, Mode::Area, Some(a), _) => Some((a, crate::area::FrameStyle::Rec)),
             // a window or a whole display: outline it too, so it is clear what is being recorded
             // (the app's own windows are excluded from the capture, so this never appears in it)
             (Phase::Recording | Phase::Countdown | Phase::Starting | Phase::Confirm, Mode::Window, _, _) => self
                 .rec
                 .window
                 .and_then(|id| self.rec.windows().iter().find(|w| w.id == id))
-                .map(|w| (PRect { x: w.x, y: w.y, width: w.width, height: w.height }, "rec")),
+                .map(|w| (PRect { x: w.x, y: w.y, width: w.width, height: w.height }, crate::area::FrameStyle::Rec)),
             (Phase::Recording | Phase::Countdown | Phase::Starting | Phase::Confirm, Mode::Display, _, _) => {
                 let ds = self.rec.displays();
                 self.rec
@@ -842,20 +879,36 @@ impl App {
                     .and_then(|id| ds.iter().find(|d| d.id == id))
                     .or_else(|| ds.iter().find(|d| d.is_main))
                     .or(ds.first())
-                    .map(|d| (PRect { x: d.x, y: d.y, width: d.width, height: d.height }, "rec"))
+                    .map(|d| (PRect { x: d.x, y: d.y, width: d.width, height: d.height }, crate::area::FrameStyle::Rec))
             }
-            (Phase::Idle, _, _, Some(w)) => Some((PRect { x: w.x, y: w.y, width: w.width, height: w.height }, "hl")),
-            (Phase::Idle, Mode::Area, Some(a), _) if self.area_picker.is_none() => Some((a, "sel")),
+            (Phase::Idle, _, _, Some(w)) => Some((PRect { x: w.x, y: w.y, width: w.width, height: w.height }, crate::area::FrameStyle::Highlight)),
+            (Phase::Idle, Mode::Area, Some(a), _) if self.area_picker.is_none() => Some((a, crate::area::FrameStyle::Selection)),
             _ => None,
         };
         if let Some((rect, style)) = outline {
             crate::area::draw_frame(&ctx, rect, style, self.rec.displays());
         }
-        if self.show_permissions {
-            self.show_permissions = crate::permissions::show(&ctx, &mut self.rec);
-        }
         if self.quit {
             ctx.send_viewport_cmd(ViewportCommand::Close);
         }
     }
+}
+
+/// Delete a `.screencraft` package folder, retrying briefly on Windows in case a background
+/// reader (e.g. waveform scan) is still releasing its file handle.
+fn remove_package_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    let mut last_err = None;
+    for attempt in 0..10 {
+        match std::fs::remove_dir_all(dir) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                last_err = Some(e);
+                if attempt < 9 {
+                    std::thread::sleep(Duration::from_millis(40));
+                }
+            }
+        }
+    }
+    Err(last_err.unwrap())
 }

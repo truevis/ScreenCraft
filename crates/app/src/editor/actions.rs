@@ -10,6 +10,7 @@ impl EditorState {
     pub fn touch(&mut self) {
         self.dirty_since = Some(Instant::now());
         self.track_dirty = true;
+        self.project_rev = self.project_rev.wrapping_add(1);
     }
 
     /// Idle stretches `[start, end]` in source ms.
@@ -210,6 +211,8 @@ impl EditorState {
     /// Start whisper.cpp on this recording's microphone.
     pub fn start_captions(&mut self) {
         let (tx, rx) = std::sync::mpsc::channel();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.panel.caps.cancel = cancel.clone();
         self.panel.caps.rx = Some(rx);
         self.panel.caps.busy = true;
         self.panel.caps.msg = "Starting…".into();
@@ -220,6 +223,7 @@ impl EditorState {
                 project: self.project.clone(),
                 model: self.panel.caps.model.clone(),
                 language: self.panel.caps.language.clone(),
+                cancel,
             },
         );
     }
@@ -228,6 +232,7 @@ impl EditorState {
     pub fn take_caption_results(&mut self) {
         let Some(done) = self.panel.caps.done.take() else { return };
         match done {
+            Err(e) if e == "cancelled" => {}
             Err(e) => self.error = Some(format!("Caption generation failed: {e}")),
             Ok(caps) if caps.is_empty() => self.error = Some("No speech was found in this recording.".into()),
             Ok(caps) => {

@@ -35,6 +35,8 @@ pub fn list_sources() -> Result<Sources, String> {
             y: 0.0,
             width: 0.0,
             height: 0.0,
+            physical_width: 0,
+            physical_height: 0,
             is_main: true,
         }],
         windows: Vec::new(),

@@ -19,12 +19,12 @@ struct Preset {
 }
 
 const PRESETS: [Preset; 6] = [
-    Preset { name: "Fast 1080p30", sub: "H.264 Â· quality 55", quality: 55.0, height: Some(1080), fps: Some(30) },
-    Preset { name: "HQ 1080p30", sub: "H.264 Â· quality 75", quality: 75.0, height: Some(1080), fps: Some(30) },
-    Preset { name: "Super HQ 1080p60", sub: "H.264 Â· quality 85", quality: 85.0, height: Some(1080), fps: None },
-    Preset { name: "Fast 720p30", sub: "H.264 Â· quality 50", quality: 50.0, height: Some(720), fps: Some(30) },
-    Preset { name: "Very Fast 480p30", sub: "H.264 Â· quality 40", quality: 40.0, height: Some(480), fps: Some(30) },
-    Preset { name: "Tiny share", sub: "H.264 Â· 720p Â· quality 30", quality: 30.0, height: Some(720), fps: Some(30) },
+    Preset { name: "Fast 1080p30", sub: "H.264 · quality 55", quality: 55.0, height: Some(1080), fps: Some(30) },
+    Preset { name: "HQ 1080p30", sub: "H.264 · quality 75", quality: 75.0, height: Some(1080), fps: Some(30) },
+    Preset { name: "Super HQ 1080p60", sub: "H.264 · quality 85", quality: 85.0, height: Some(1080), fps: None },
+    Preset { name: "Fast 720p30", sub: "H.264 · quality 50", quality: 50.0, height: Some(720), fps: Some(30) },
+    Preset { name: "Very Fast 480p30", sub: "H.264 · quality 40", quality: 40.0, height: Some(480), fps: Some(30) },
+    Preset { name: "Tiny share", sub: "H.264 · 720p · quality 30", quality: 30.0, height: Some(720), fps: Some(30) },
 ];
 
 struct Probe {
@@ -117,7 +117,7 @@ impl Compressor {
                 match r {
                     Ok((p, size)) => {
                         let before = self.src.as_ref().map(|s| s.size).unwrap_or(0);
-                        self.status = format!("Done â€” {} â†’ {} ({}% smaller)", mb(before as f64), mb(size as f64), if before > 0 { ((1.0 - size as f64 / before as f64) * 100.0).max(0.0).round() } else { 0.0 });
+                        self.status = format!("Done — {} → {} ({}% smaller)", mb(before as f64), mb(size as f64), if before > 0 { ((1.0 - size as f64 / before as f64) * 100.0).max(0.0).round() } else { 0.0 });
                         self.done = Some(p);
                     }
                     Err(e) => self.status = if e == "cancelled" { "Cancelled".into() } else { format!("Failed: {e}") },
@@ -161,7 +161,7 @@ impl Compressor {
                             match &self.src {
                                 Some(s) => {
                                     ui.label(egui::RichText::new(s.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()).strong().size(13.0).color(TEXT));
-                                    ui.label(egui::RichText::new(format!("{}Ã—{} Â· {:.0} fps Â· {}:{:02} Â· {} Â· {} kbps{}", s.width, s.height, s.fps, s.duration_s as u64 / 60, s.duration_s as u64 % 60, mb(s.size as f64), s.kbps.round(), if s.has_audio { " Â· audio" } else { "" })).size(13.0).color(MUTED));
+                                    ui.label(egui::RichText::new(format!("{}×{} · {:.0} fps · {}:{:02} · {} · {} kbps{}", s.width, s.height, s.fps, s.duration_s as u64 / 60, s.duration_s as u64 % 60, mb(s.size as f64), s.kbps.round(), if s.has_audio { " · audio" } else { "" })).size(13.0).color(MUTED));
                                 }
                                 None => {
                                     ui.label(egui::RichText::new("No video selected").strong().size(13.0).color(TEXT));
@@ -170,7 +170,7 @@ impl Compressor {
                             }
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if kit::pill(ui, None, "Choose fileâ€¦", false, false, false, None).clicked() {
+                            if kit::pill(ui, None, "Choose file…", false, false, false, None).clicked() {
                                 if let Some(p) = rfd::FileDialog::new().add_filter("Video", &["mp4", "m4v", "mov"]).pick_file() {
                                     self.load(p);
                                 }
@@ -215,7 +215,7 @@ impl Compressor {
                             let (size, rate) = self.estimate().unwrap_or((0.0, 0.0));
                             let txt = match (&self.src, size > 0.0) {
                                 (Some(s), true) => format!("{} ({}% smaller)", mb(size), ((1.0 - size / s.size.max(1) as f64) * 100.0).max(0.0).round()),
-                                _ => "â€”".into(),
+                                _ => "—".into(),
                             };
                             ui.label(egui::RichText::new(txt).size(20.0).color(ACCENT_2));
                             let _ = rate;
@@ -224,7 +224,7 @@ impl Compressor {
                             ui.vertical(|ui| {
                                 kit::muted(ui, "Video bitrate");
                                 let rate = self.estimate().map(|e| e.1).unwrap_or(0.0);
-                                ui.label(egui::RichText::new(if rate > 0.0 { format!("{:.2} Mbps", rate / 1e6) } else { "â€”".into() }).size(20.0).color(ACCENT_2));
+                                ui.label(egui::RichText::new(if rate > 0.0 { format!("{:.2} Mbps", rate / 1e6) } else { "—".into() }).size(20.0).color(ACCENT_2));
                             });
                         });
                     });
@@ -235,7 +235,7 @@ impl Compressor {
                         let (r, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 6.0), Sense::hover());
                         ui.painter().rect_filled(r, CornerRadius::same(3), LINE_2);
                         ui.painter().rect_filled(Rect::from_min_size(r.min, Vec2::new(r.width() * v, 6.0)), CornerRadius::same(3), ACCENT_2);
-                        ui.label(egui::RichText::new(format!("Compressingâ€¦ {}%", (v * 100.0).round())).size(13.0).color(MUTED));
+                        ui.label(egui::RichText::new(format!("Compressing… {}%", (v * 100.0).round())).size(13.0).color(MUTED));
                     });
                 } else if !self.status.is_empty() {
                     ui.label(egui::RichText::new(&self.status).size(13.0).color(MUTED));
@@ -250,7 +250,7 @@ impl Compressor {
                         }
                     } else {
                         let ready = self.src.is_some();
-                        let go = ui.add_enabled_ui(ready, |ui| kit::primary(ui, None, "Compressâ€¦")).inner;
+                        let go = ui.add_enabled_ui(ready, |ui| kit::primary(ui, None, "Compress…")).inner;
                         if go.clicked() && ready {
                             self.start(ui.ctx());
                         }

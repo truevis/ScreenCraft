@@ -43,6 +43,16 @@ struct Layer {
     view: wgpu::TextureView,
     w: u32,
     h: u32,
+    src: Arc<tiny_skia::Pixmap>,
+}
+
+pub struct ReadbackTicket {
+    slot: usize,
+    w: u32,
+    h: u32,
+    padded: u32,
+    sub: wgpu::SubmissionIndex,
+    rx: std::sync::mpsc::Receiver<std::result::Result<(), wgpu::BufferAsyncError>>,
 }
 
 pub struct Compositor {
@@ -55,8 +65,12 @@ pub struct Compositor {
     cam_pipeline: wgpu::RenderPipeline,
     blit_layout: wgpu::BindGroupLayout,
     blit_pipeline: wgpu::RenderPipeline,
+    accum_layout: wgpu::BindGroupLayout,
+    accum_pipeline: wgpu::RenderPipeline,
+    resolve_pipeline: wgpu::RenderPipeline,
     uniform: wgpu::Buffer,
     cam_uniform: wgpu::Buffer,
+    accum_uniform: wgpu::Buffer,
     sampler: wgpu::Sampler,
     atlas_view: wgpu::TextureView,
     slots: [Option<Planes>; 4],
@@ -66,7 +80,14 @@ pub struct Compositor {
     bg_tex: Option<(Arc<(u32, u32, Vec<u8>)>, wgpu::Texture, wgpu::TextureView)>,
     target: Option<Target>,
     work: Option<Target>,
-    readback: Option<(wgpu::Buffer, u32)>,
+    accum: Option<Target>,
+    main_bind_cache: Option<wgpu::BindGroup>,
+    post_bind_cache: Option<wgpu::BindGroup>,
+    cam_bind_cache: Option<wgpu::BindGroup>,
+    blit_bind_cache: Option<wgpu::BindGroup>,
+    accum_bind_cache: Option<wgpu::BindGroup>,
+    resolve_bind_cache: Option<wgpu::BindGroup>,
+    readback: [Option<(wgpu::Buffer, u32, u32)>; 2],
 }
 
 fn plane(device: &wgpu::Device, w: u32, h: u32, label: &str) -> wgpu::Texture {
@@ -123,6 +144,15 @@ fn tex_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
+fn tex_entry_unfilterable(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: false }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+        count: None,
+    }
+}
+
 fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None }
 }
@@ -137,6 +167,18 @@ fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
 }
 
 fn pipeline(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, module: &wgpu::ShaderModule, fs: &str, blend: Option<wgpu::BlendState>, label: &str) -> wgpu::RenderPipeline {
+    pipeline_fmt(device, layout, module, fs, FORMAT, blend, label)
+}
+
+fn pipeline_fmt(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    module: &wgpu::ShaderModule,
+    fs: &str,
+    format: wgpu::TextureFormat,
+    blend: Option<wgpu::BlendState>,
+    label: &str,
+) -> wgpu::RenderPipeline {
     let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some(label), bind_group_layouts: &[Some(layout)], immediate_size: 0 });
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(label),
@@ -149,7 +191,7 @@ fn pipeline(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, module: &wgpu
             module,
             entry_point: Some(fs),
             compilation_options: Default::default(),
-            targets: &[Some(wgpu::ColorTargetState { format: FORMAT, blend, write_mask: wgpu::ColorWrites::ALL })],
+            targets: &[Some(wgpu::ColorTargetState { format, blend, write_mask: wgpu::ColorWrites::ALL })],
         }),
         multiview_mask: None,
         cache: None,
@@ -162,6 +204,7 @@ impl Compositor {
         let main_module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("screencraft-compose"), source: wgpu::ShaderSource::Wgsl(shader_source().into()) });
         let cam_module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("screencraft-camera"), source: wgpu::ShaderSource::Wgsl(include_str!("camera.wgsl").into()) });
         let blit_module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("screencraft-blit"), source: wgpu::ShaderSource::Wgsl(include_str!("blit.wgsl").into()) });
+        let accum_module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("screencraft-accum"), source: wgpu::ShaderSource::Wgsl(include_str!("accum.wgsl").into()) });
         let main_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("compose-layout"),
             entries: &[uniform_entry(0), tex_entry(1), tex_entry(2), tex_entry(3), tex_entry(4), sampler_entry(5), tex_entry(6), tex_entry(7), tex_entry(8), tex_entry(9), tex_entry(10), tex_entry(11), tex_entry(12)],
@@ -171,12 +214,20 @@ impl Compositor {
             entries: &[uniform_entry(0), tex_entry(1), tex_entry(2), tex_entry(3), sampler_entry(4), tex_entry(5), tex_entry(6), tex_entry(7)],
         });
         let blit_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("blit-layout"), entries: &[tex_entry(0), sampler_entry(1)] });
+        let accum_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("accum-layout"), entries: &[tex_entry_unfilterable(0), uniform_entry(1)] });
         let main_pipeline = pipeline(device, &main_layout, &main_module, "fs", None, "compose");
         let post_pipeline = pipeline(device, &main_layout, &main_module, "fs_post", None, "compose-post");
         let cam_pipeline = pipeline(device, &cam_layout, &cam_module, "fs", Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING), "camera");
         let blit_pipeline = pipeline(device, &blit_layout, &blit_module, "fs", Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING), "blit");
+        let add_blend = wgpu::BlendState {
+            color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add },
+            alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add },
+        };
+        let accum_pipeline = pipeline_fmt(device, &accum_layout, &accum_module, "fs", wgpu::TextureFormat::Rgba16Float, Some(add_blend), "accum");
+        let resolve_pipeline = pipeline(device, &accum_layout, &accum_module, "fs", None, "accum-resolve");
         let uniform = device.create_buffer(&wgpu::BufferDescriptor { label: Some("compose-uniform"), size: 48 * 16, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let cam_uniform = device.create_buffer(&wgpu::BufferDescriptor { label: Some("camera-uniform"), size: 8 * 16, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let accum_uniform = device.create_buffer(&wgpu::BufferDescriptor { label: Some("accum-uniform"), size: 16, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
@@ -232,8 +283,12 @@ impl Compositor {
             cam_pipeline,
             blit_layout,
             blit_pipeline,
+            accum_layout,
+            accum_pipeline,
+            resolve_pipeline,
             uniform,
             cam_uniform,
+            accum_uniform,
             sampler,
             atlas_view,
             slots: [None, None, None, None],
@@ -243,7 +298,14 @@ impl Compositor {
             bg_tex: None,
             target: None,
             work: None,
-            readback: None,
+            accum: None,
+            main_bind_cache: None,
+            post_bind_cache: None,
+            cam_bind_cache: None,
+            blit_bind_cache: None,
+            accum_bind_cache: None,
+            resolve_bind_cache: None,
+            readback: [None, None],
         }
     }
 
@@ -267,6 +329,15 @@ impl Compositor {
         let need_new = !matches!(&self.slots[i], Some(p) if p.w == w && p.h == h);
         if need_new {
             self.slots[i] = Some(make_planes(&self.device, w, h));
+            match slot {
+                Slot::Screen | Slot::Screen2 => {
+                    self.main_bind_cache = None;
+                    self.post_bind_cache = None;
+                }
+                Slot::Camera | Slot::Camera2 => {
+                    self.cam_bind_cache = None;
+                }
+            }
         }
         let p = self.slots[i].as_ref().unwrap();
         write_plane(&self.queue, &p.y, &f.y, w, h);
@@ -276,16 +347,26 @@ impl Compositor {
 
     /// Forget a slot's picture (nothing to blend / no camera).
     pub fn clear_slot(&mut self, slot: Slot) {
-        self.slots[slot as usize] = None;
+        if self.slots[slot as usize].take().is_some() {
+            match slot {
+                Slot::Screen | Slot::Screen2 => {
+                    self.main_bind_cache = None;
+                    self.post_bind_cache = None;
+                }
+                Slot::Camera | Slot::Camera2 => {
+                    self.cam_bind_cache = None;
+                }
+            }
+        }
     }
 
     pub fn has_slot(&self, slot: Slot) -> bool {
         self.slots[slot as usize].is_some()
     }
 
-    fn ensure_target(device: &wgpu::Device, t: &mut Option<Target>, w: u32, h: u32, label: &str) {
+    fn ensure_target(device: &wgpu::Device, t: &mut Option<Target>, w: u32, h: u32, format: wgpu::TextureFormat, label: &str) -> bool {
         if matches!(t, Some(x) if x.w == w && x.h == h) {
-            return;
+            return false;
         }
         let tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some(label),
@@ -293,15 +374,19 @@ impl Compositor {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: FORMAT,
+            format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let view = tex.create_view(&Default::default());
         *t = Some(Target { tex, view, w, h });
+        true
     }
 
-    fn upload_layer(&mut self, i: usize, px: &tiny_skia::Pixmap) {
+    fn upload_layer(&mut self, i: usize, px: &Arc<tiny_skia::Pixmap>) {
+        if matches!(&self.layers[i], Some(l) if Arc::ptr_eq(&l.src, px)) {
+            return;
+        }
         let (w, h) = (px.width(), px.height());
         if !matches!(&self.layers[i], Some(l) if l.w == w && l.h == h) {
             let tex = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -315,7 +400,15 @@ impl Compositor {
                 view_formats: &[],
             });
             let view = tex.create_view(&Default::default());
-            self.layers[i] = Some(Layer { tex, view, w, h });
+            self.layers[i] = Some(Layer { tex, view, w, h, src: px.clone() });
+            if i < 2 {
+                self.main_bind_cache = None;
+                self.post_bind_cache = None;
+            } else {
+                self.blit_bind_cache = None;
+            }
+        } else {
+            self.layers[i].as_mut().unwrap().src = px.clone();
         }
         let l = self.layers[i].as_ref().unwrap();
         self.queue.write_texture(
@@ -324,6 +417,17 @@ impl Compositor {
             wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
             wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         );
+    }
+
+    fn clear_layer(&mut self, i: usize) {
+        if self.layers[i].take().is_some() {
+            if i < 2 {
+                self.main_bind_cache = None;
+                self.post_bind_cache = None;
+            } else {
+                self.blit_bind_cache = None;
+            }
+        }
     }
 
     fn upload_bg(&mut self, img: &Arc<(u32, u32, Vec<u8>)>) {
@@ -348,6 +452,8 @@ impl Compositor {
         );
         let view = tex.create_view(&Default::default());
         self.bg_tex = Some((img.clone(), tex, view));
+        self.main_bind_cache = None;
+        self.post_bind_cache = None;
     }
 
     fn uniforms(scene: &Scene) -> [[f32; 4]; 48] {
@@ -436,23 +542,25 @@ impl Compositor {
     /// Draw `scene` into the internal target and return its view (for egui).
     pub fn render(&mut self, scene: &Scene) -> &wgpu::TextureView {
         let (w, h) = scene.out;
-        Self::ensure_target(&self.device, &mut self.target, w, h, "compose-target");
+        if Self::ensure_target(&self.device, &mut self.target, w, h, FORMAT, "compose-target") {
+            self.accum_bind_cache = None;
+        }
         let post = scene.transition.is_some();
-        if post {
-            Self::ensure_target(&self.device, &mut self.work, w, h, "compose-work");
+        if post && Self::ensure_target(&self.device, &mut self.work, w, h, FORMAT, "compose-work") {
+            self.post_bind_cache = None;
         }
         // CPU layers
         match &scene.layers.under {
             Some(p) => self.upload_layer(0, p),
-            None => self.layers[0] = None,
+            None => self.clear_layer(0),
         }
         match &scene.layers.content {
             Some(p) => self.upload_layer(1, p),
-            None => self.layers[1] = None,
+            None => self.clear_layer(1),
         }
         match &scene.layers.top {
             Some(p) => self.upload_layer(2, p),
-            None => self.layers[2] = None,
+            None => self.clear_layer(2),
         }
         if let Some(img) = &scene.bg_image {
             self.upload_bg(img);
@@ -476,13 +584,48 @@ impl Compositor {
             self.queue.write_buffer(&self.cam_uniform, 0, bytemuck::cast_slice(&cu));
         }
 
-        let main_view_is_work = post;
-        let work_view_for_bind = if post { &self.work.as_ref().unwrap().view } else { &self.target.as_ref().unwrap().view };
         // The main pass never samples `work`; bind a harmless texture there.
-        let dummy_bind = self.main_bind(&self.clear_layer);
-        let _ = work_view_for_bind;
-        let main_target = if main_view_is_work { &self.work.as_ref().unwrap().view } else { &self.target.as_ref().unwrap().view };
+        if self.main_bind_cache.is_none() {
+            self.main_bind_cache = Some(self.main_bind(&self.clear_layer));
+        }
+        if let (Some(_), Some(cp)) = (cam, cam_planes) {
+            if self.cam_bind_cache.is_none() {
+                let c2 = self.slots[Slot::Camera2 as usize].as_ref().unwrap_or(&self.dummy);
+                let e = be;
+                self.cam_bind_cache = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("camera-bind"),
+                    layout: &self.cam_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: self.cam_uniform.as_entire_binding() },
+                        e(1, &cp.yv),
+                        e(2, &cp.uv),
+                        e(3, &cp.vv),
+                        wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                        e(5, &c2.yv),
+                        e(6, &c2.uv),
+                        e(7, &c2.vv),
+                    ],
+                }));
+            }
+        }
+        if let Some(top) = &self.layers[2] {
+            if self.blit_bind_cache.is_none() {
+                self.blit_bind_cache = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("blit-bind"),
+                    layout: &self.blit_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&top.view) },
+                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                    ],
+                }));
+            }
+        }
+        if post && self.post_bind_cache.is_none() {
+            let work_view = &self.work.as_ref().unwrap().view;
+            self.post_bind_cache = Some(self.main_bind(work_view));
+        }
 
+        let main_target = if post { &self.work.as_ref().unwrap().view } else { &self.target.as_ref().unwrap().view };
         let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("compose") });
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -499,26 +642,10 @@ impl Compositor {
                 multiview_mask: None,
             });
             pass.set_pipeline(&self.main_pipeline);
-            pass.set_bind_group(0, &dummy_bind, &[]);
+            pass.set_bind_group(0, self.main_bind_cache.as_ref().unwrap(), &[]);
             pass.draw(0..3, 0..1);
         }
-        if let (Some(_), Some(cp)) = (cam, cam_planes) {
-            let c2 = self.slots[Slot::Camera2 as usize].as_ref().unwrap_or(&self.dummy);
-            let e = be;
-            let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("camera-bind"),
-                layout: &self.cam_layout,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: self.cam_uniform.as_entire_binding() },
-                    e(1, &cp.yv),
-                    e(2, &cp.uv),
-                    e(3, &cp.vv),
-                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                    e(5, &c2.yv),
-                    e(6, &c2.uv),
-                    e(7, &c2.vv),
-                ],
-            });
+        if cam.is_some() {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("compose-camera"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -533,18 +660,10 @@ impl Compositor {
                 multiview_mask: None,
             });
             pass.set_pipeline(&self.cam_pipeline);
-            pass.set_bind_group(0, &bind, &[]);
+            pass.set_bind_group(0, self.cam_bind_cache.as_ref().unwrap(), &[]);
             pass.draw(0..3, 0..1);
         }
-        if let Some(top) = &self.layers[2] {
-            let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("blit-bind"),
-                layout: &self.blit_layout,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&top.view) },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                ],
-            });
+        if self.layers[2].is_some() {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("compose-top"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -559,11 +678,10 @@ impl Compositor {
                 multiview_mask: None,
             });
             pass.set_pipeline(&self.blit_pipeline);
-            pass.set_bind_group(0, &bind, &[]);
+            pass.set_bind_group(0, self.blit_bind_cache.as_ref().unwrap(), &[]);
             pass.draw(0..3, 0..1);
         }
         if post {
-            let bind = self.main_bind(&self.work.as_ref().unwrap().view);
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("compose-post"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -578,7 +696,88 @@ impl Compositor {
                 multiview_mask: None,
             });
             pass.set_pipeline(&self.post_pipeline);
-            pass.set_bind_group(0, &bind, &[]);
+            pass.set_bind_group(0, self.post_bind_cache.as_ref().unwrap(), &[]);
+            pass.draw(0..3, 0..1);
+        }
+        self.queue.submit(Some(enc.finish()));
+        &self.target.as_ref().unwrap().view
+    }
+
+    /// Render one motion-blur sub-frame and accumulate it on the GPU with `weight` into `Rgba16Float`.
+    pub fn accum_subframe(&mut self, scene: &Scene, first: bool, weight: f32) {
+        let (w, h) = scene.out;
+        self.render(scene);
+        if Self::ensure_target(&self.device, &mut self.accum, w, h, wgpu::TextureFormat::Rgba16Float, "compose-accum") {
+            self.resolve_bind_cache = None;
+        }
+        if self.accum_bind_cache.is_none() {
+            let src_view = &self.target.as_ref().unwrap().view;
+            self.accum_bind_cache = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("accum-bind"),
+                layout: &self.accum_layout,
+                entries: &[
+                    be(0, src_view),
+                    wgpu::BindGroupEntry { binding: 1, resource: self.accum_uniform.as_entire_binding() },
+                ],
+            }));
+        }
+        self.queue.write_buffer(&self.accum_uniform, 0, bytemuck::cast_slice(&[weight, 0.0f32, 0.0, 0.0]));
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("accum") });
+        {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("accum-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.accum.as_ref().unwrap().view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: if first { wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT) } else { wgpu::LoadOp::Load },
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.accum_pipeline);
+            pass.set_bind_group(0, self.accum_bind_cache.as_ref().unwrap(), &[]);
+            pass.draw(0..3, 0..1);
+        }
+        self.queue.submit(Some(enc.finish()));
+    }
+
+    /// Resolve the accumulated `Rgba16Float` motion-blur target back into `target` (`Rgba8Unorm`).
+    pub fn resolve_accum(&mut self) -> &wgpu::TextureView {
+        if self.resolve_bind_cache.is_none() {
+            let accum_view = &self.accum.as_ref().unwrap().view;
+            self.resolve_bind_cache = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("resolve-bind"),
+                layout: &self.accum_layout,
+                entries: &[
+                    be(0, accum_view),
+                    wgpu::BindGroupEntry { binding: 1, resource: self.accum_uniform.as_entire_binding() },
+                ],
+            }));
+        }
+        self.queue.write_buffer(&self.accum_uniform, 0, bytemuck::cast_slice(&[1.0f32, 0.0, 0.0, 0.0]));
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("resolve") });
+        {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("resolve-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.target.as_ref().unwrap().view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.resolve_pipeline);
+            pass.set_bind_group(0, self.resolve_bind_cache.as_ref().unwrap(), &[]);
             pass.draw(0..3, 0..1);
         }
         self.queue.submit(Some(enc.finish()));
@@ -593,14 +792,15 @@ impl Compositor {
         &self.device
     }
 
-    /// Read the last rendered frame back as tightly packed RGBA8. Blocks until the GPU is done.
-    pub fn read_rgba(&mut self) -> Result<Vec<u8>, String> {
+    /// Queue a non-blocking GPU->staging readback into buffer `slot` (0 or 1).
+    pub fn begin_readback(&mut self, slot: usize) -> Result<ReadbackTicket, String> {
+        let slot = slot % self.readback.len();
         let (w, h) = {
             let t = self.target.as_ref().ok_or("nothing rendered yet")?;
             (t.w, t.h)
         };
         let padded = (w * 4).div_ceil(256) * 256;
-        let need = matches!(&self.readback, Some((_, p)) if *p == padded);
+        let need = matches!(&self.readback[slot], Some((_, p, bh)) if *p == padded && *bh == h);
         if !need {
             let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("readback"),
@@ -608,9 +808,9 @@ impl Compositor {
                 usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
                 mapped_at_creation: false,
             });
-            self.readback = Some((buf, padded));
+            self.readback[slot] = Some((buf, padded, h));
         }
-        let (buf, _) = self.readback.as_ref().unwrap();
+        let (buf, _, _) = self.readback[slot].as_ref().unwrap();
         let t = self.target.as_ref().unwrap();
         let mut enc = self.device.create_command_encoder(&Default::default());
         enc.copy_texture_to_buffer(
@@ -626,22 +826,39 @@ impl Compositor {
             },
             wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         );
-        self.queue.submit(Some(enc.finish()));
+        let sub = self.queue.submit(Some(enc.finish()));
         let slice = buf.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        self.device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| format!("GPU wait: {e:?}"))?;
-        rx.recv().map_err(|e| e.to_string())?.map_err(|e| format!("GPU readback: {e}"))?;
+        let _ = self.device.poll(wgpu::PollType::Poll);
+        Ok(ReadbackTicket { slot, w, h, padded, sub, rx })
+    }
+
+    /// Complete a readback started with [`Self::begin_readback`] and return tightly packed RGBA8.
+    pub fn finish_readback(&mut self, ticket: ReadbackTicket) -> Result<Vec<u8>, String> {
+        self.device
+            .poll(wgpu::PollType::Wait { submission_index: Some(ticket.sub), timeout: None })
+            .map_err(|e| format!("GPU wait: {e:?}"))?;
+        ticket.rx.recv().map_err(|e| e.to_string())?.map_err(|e| format!("GPU readback: {e}"))?;
+        let (buf, _, _) = self.readback[ticket.slot].as_ref().unwrap();
+        let slice = buf.slice(..);
         let mapped = slice.get_mapped_range().map_err(|e| format!("GPU readback: {e:?}"))?;
-        let mut out = vec![0u8; (w * h * 4) as usize];
-        for y in 0..h as usize {
-            let s = y * padded as usize;
-            out[y * w as usize * 4..(y + 1) * w as usize * 4].copy_from_slice(&mapped[s..s + w as usize * 4]);
+        let (w, h, padded) = (ticket.w as usize, ticket.h as usize, ticket.padded as usize);
+        let mut out = vec![0u8; w * h * 4];
+        for y in 0..h {
+            let s = y * padded;
+            out[y * w * 4..(y + 1) * w * 4].copy_from_slice(&mapped[s..s + w * 4]);
         }
         drop(mapped);
         buf.unmap();
         Ok(out)
+    }
+
+    /// Read the last rendered frame back as tightly packed RGBA8. Blocks until the GPU is done.
+    pub fn read_rgba(&mut self) -> Result<Vec<u8>, String> {
+        let ticket = self.begin_readback(0)?;
+        self.finish_readback(ticket)
     }
 }

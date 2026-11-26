@@ -326,6 +326,15 @@ impl MfH264Decoder {
         }
     }
 
+    /// Discard any buffered pictures so decoding can resume from a new keyframe.
+    pub fn flush(&mut self) -> Result<()> {
+        init()?;
+        unsafe {
+            self.mft.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0).map_err(|e| err("flush decoder", e))?;
+        }
+        Ok(())
+    }
+
     /// Feed one length-prefixed access unit; returns the picture when one is ready.
     pub fn decode(&mut self, sample: &[u8]) -> Result<Option<I420>> {
         init()?;

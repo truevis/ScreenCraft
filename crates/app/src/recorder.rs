@@ -17,7 +17,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-pub const BAR_W: f32 = 1260.0;
+pub const BAR_W: f32 = 1056.0;
 pub const BAR_H: f32 = 76.0;
 
 /// Resolution choices: cap on the long side in px (0 = the display's native resolution).
@@ -149,6 +149,7 @@ pub enum MenuAction {
     PickProject,
     RevealFolder,
     ChooseFolder,
+    ToggleGlobalHotkey,
 }
 
 #[derive(Clone, Debug)]
@@ -188,7 +189,6 @@ pub enum Action {
     OpenProject(PathBuf),
     PickArea,
     HoverWindow(Option<WindowInfo>),
-    ShowPermissions,
 }
 
 pub struct Recorder {
@@ -222,8 +222,8 @@ pub struct Recorder {
     pub controller: Controller,
     pub menu: Option<Menu>,
     last_menu_close: Option<(MenuKind, Instant)>,
-    pub finished: Option<Finished>,
     pub live: crate::live::Live,
+    idle_w: Option<f32>,
 }
 
 impl Recorder {
@@ -263,8 +263,8 @@ impl Recorder {
             controller: Controller::spawn(ctx.clone()),
             menu: None,
             last_menu_close: None,
-            finished: None,
             live: crate::live::Live::new(ctx),
+            idle_w: None,
         }
     }
 
@@ -303,11 +303,11 @@ impl Recorder {
                 }
             }
         }
-        if stale(&self.perms_at, 2) {
+        if cfg!(target_os = "macos") && stale(&self.perms_at, 2) {
             self.permissions = screencraft_capture::permissions();
             self.perms_at = Some(Instant::now());
         }
-        if !self.sources_busy && stale(&self.sources_at, 4) && self.phase == Phase::Idle && (self.permissions.screen || self.sources.is_none()) {
+        if !self.sources_busy && self.phase == Phase::Idle && (self.sources.is_none() || (stale(&self.sources_at, 30) && (self.permissions.screen || self.sources.is_none()))) {
             self.sources_busy = true;
             self.sources_at = Some(Instant::now());
             let (tx, ctx) = (self.probe_tx.clone(), self.ctx.clone());
@@ -392,11 +392,15 @@ impl Recorder {
         self.started_at.map(|t| t.elapsed().as_secs_f64() * 1000.0).unwrap_or(0.0)
     }
 
+    pub fn bar_width(&self) -> f32 {
+        self.idle_w.unwrap_or(BAR_W)
+    }
+
     /// The window size the current phase wants (the bar stays anchored at its bottom centre).
     pub fn window_size(&self, screen_w: f32, camera: bool) -> Vec2 {
         let menu_h = self.menu.as_ref().map(|m| menu_height(m) + 8.0 + 10.0).unwrap_or(0.0);
         match self.phase {
-            Phase::Idle | Phase::Starting => Vec2::new(BAR_W.min(screen_w - 24.0), BAR_H + menu_h),
+            Phase::Idle | Phase::Starting => Vec2::new(self.bar_width().min(screen_w - 24.0), BAR_H + menu_h),
             Phase::Countdown => Vec2::new(240.0, 60.0),
             Phase::Recording | Phase::Finishing => Vec2::new(if camera { 380.0 } else { 340.0 }, 60.0),
             Phase::Confirm => Vec2::new(420.0, 60.0),
@@ -507,7 +511,12 @@ impl Recorder {
             let sub = if val > 0 {
                 dims(val)
             } else if let Some(d) = d {
-                format!("{} × {} on Retina", d.width as u32 * 2, d.height as u32 * 2)
+                let (pw, ph) = if d.physical_width > 0 && d.physical_height > 0 {
+                    (d.physical_width, d.physical_height)
+                } else {
+                    (d.width.round() as u32, d.height.round() as u32)
+                };
+                format!("{pw} × {ph}")
             } else {
                 "Full pixel size of the display".into()
             };
@@ -539,6 +548,13 @@ impl Recorder {
         v.push(MenuItem::Header("Raw recordings folder".into()));
         v.push(MenuItem::Item { label: "Open recordings folder".into(), sub: prefs.recordings_dir.display().to_string(), checked: false, action: MenuAction::RevealFolder });
         v.push(MenuItem::Item { label: "Choose recordings folder…".into(), sub: String::new(), checked: false, action: MenuAction::ChooseFolder });
+        v.push(MenuItem::Header("Shortcut".into()));
+        v.push(MenuItem::Item {
+            label: "Global hotkey (Ctrl+Shift+R)".into(),
+            sub: "Start or stop recording from any app".into(),
+            checked: prefs.global_hotkey,
+            action: MenuAction::ToggleGlobalHotkey,
+        });
         v
     }
 
@@ -581,6 +597,9 @@ impl Recorder {
                     prefs.recordings_dir = d;
                 }
             }
+            MenuAction::ToggleGlobalHotkey => {
+                prefs.global_hotkey = !prefs.global_hotkey;
+            }
         }
         prefs.mode = self.mode.name().into();
         prefs.save();
@@ -618,7 +637,7 @@ impl Recorder {
                 }
             }
             Phase::Countdown => action = self.draw_countdown(ui, bar),
-            Phase::Recording | Phase::Finishing => action = self.draw_hud(ui, bar),
+            Phase::Recording | Phase::Finishing => action = self.draw_hud(ui, bar, prefs),
             Phase::Confirm => action = self.draw_confirm(ui, bar),
         }
         // menu above the bar
@@ -735,7 +754,7 @@ impl Recorder {
             }
             let (r, resp) = opt_button(ui, Pos2::new(x, oy), icon, &label, on, 108.0, level, is_loading, tex);
             if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() && !is_loading {
-                toggled = Some((kind, (r.min.x - left0).clamp(8.0, BAR_W - 320.0)));
+                toggled = Some((kind, (r.min.x - left0).clamp(8.0, (bar.width() - 320.0).max(8.0))));
             }
             x += r.width() + 6.0;
         }
@@ -752,7 +771,7 @@ impl Recorder {
         let (r, resp) = opt_button_chev(ui, Pos2::new(x, oy), "chart", &qual, 138.0);
         if resp.on_hover_text("Resolution & frame rate").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
             let items = self.quality_items(prefs);
-            self.toggle_menu(MenuKind::Quality, items, (r.min.x - left0).clamp(8.0, BAR_W - 320.0));
+            self.toggle_menu(MenuKind::Quality, items, (r.min.x - left0).clamp(8.0, (bar.width() - 320.0).max(8.0)));
         }
         x += r.width() + 6.0;
         if matches!(self.mode, Mode::Area | Mode::Camera) {
@@ -771,12 +790,18 @@ impl Recorder {
         let (r, resp) = opt_button_icon_right(ui, Pos2::new(x, oy), "Projects", "folder");
         if resp.on_hover_text("Open projects").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
             let items = self.folder_items(prefs);
-            self.toggle_menu(MenuKind::Folder, items, (r.min.x - left0).clamp(8.0, BAR_W - 320.0));
+            self.toggle_menu(MenuKind::Folder, items, (r.min.x - left0).clamp(8.0, (bar.width() - 320.0).max(8.0)));
         }
 
         // ---- record
         let rec_w = 16.0 * 2.0 + 14.0 + 9.0 + kit::text_width(ui, "Record", 13.5);
-        let rec = Rect::from_min_size(Pos2::new(bar.max.x - 12.0 - rec_w, cy - 23.0), Vec2::new(rec_w, 46.0));
+        let needed_w = (r.max.x - bar.min.x) + 14.0 + rec_w + 12.0;
+        if self.idle_w.map(|w| (w - needed_w).abs() > 0.5).unwrap_or(true) {
+            self.idle_w = Some(needed_w);
+            ui.ctx().request_repaint();
+        }
+        let rec_x = (bar.max.x - 12.0 - rec_w).max(r.max.x + 14.0);
+        let rec = Rect::from_min_size(Pos2::new(rec_x, cy - 23.0), Vec2::new(rec_w, 46.0));
         let resp = ui.interact(rec, ui.id().with("rec"), if loading { Sense::hover() } else { Sense::click() });
         let hov = resp.hovered() && !loading;
         let col = if hov { ACCENT_2 } else { ACCENT };
@@ -794,7 +819,8 @@ impl Recorder {
         ui.painter().circle_filled(dot, 10.0, Color32::from_white_alpha(71));
         ui.painter().circle_filled(dot, 7.0, Color32::WHITE);
         ui.painter().text(Pos2::new(rec.min.x + 16.0 + 14.0 + 9.0, rec.center().y), Align2::LEFT_CENTER, "Record", kit::font(13.5), Color32::WHITE);
-        if resp.on_hover_cursor(if loading { egui::CursorIcon::NotAllowed } else { egui::CursorIcon::PointingHand }).clicked() && !loading {
+        let tip = if prefs.global_hotkey { "Start recording (Ctrl+Shift+R)" } else { "Start recording" };
+        if resp.on_hover_text(tip).on_hover_cursor(if loading { egui::CursorIcon::NotAllowed } else { egui::CursorIcon::PointingHand }).clicked() && !loading {
             action = Action::Record;
         }
         action
@@ -805,6 +831,15 @@ impl Recorder {
         self.mode = m;
         prefs.mode = m.name().into();
         prefs.save();
+        if matches!(m, Mode::Display | Mode::Window) && !self.sources_busy && self.sources_at.map(|t| t.elapsed().as_secs() >= 2).unwrap_or(true) {
+            self.sources_busy = true;
+            self.sources_at = Some(Instant::now());
+            let (tx, ctx) = (self.probe_tx.clone(), self.ctx.clone());
+            std::thread::spawn(move || {
+                let _ = tx.send(Probe::Sources(screencraft_capture::list_sources()));
+                ctx.request_repaint();
+            });
+        }
         match m {
             Mode::Display => {
                 let ds = self.displays().to_vec();
@@ -974,7 +1009,7 @@ impl Recorder {
         a
     }
 
-    fn draw_hud(&mut self, ui: &mut egui::Ui, bar: Rect) -> Action {
+    fn draw_hud(&mut self, ui: &mut egui::Ui, bar: Rect, prefs: &Prefs) -> Action {
         let mut action = Action::None;
         let cy = bar.center().y;
         let mut x = bar.min.x + 12.0;
@@ -999,11 +1034,14 @@ impl Recorder {
         x += w + 14.0;
         if !finishing {
             if let Some(s) = &self.stats {
-                for (lvl, tip) in [(s.mic_peak(), "Microphone"), (s.system_peak(), "System audio")] {
+                for (enabled, lvl, tip) in [(prefs.microphone, s.mic_peak(), "Microphone"), (prefs.system_audio, s.system_peak(), "System audio")] {
+                    if !enabled {
+                        continue;
+                    }
                     let r = Rect::from_min_size(Pos2::new(x, cy - 2.5), Vec2::new(34.0, 5.0));
                     ui.painter().rect_filled(r, CornerRadius::same(3), Color32::from_white_alpha(36));
                     meter_fill(ui, r, lvl.sqrt());
-                    let _ = tip;
+                    ui.interact(r, ui.id().with(("hud-meter", tip)), Sense::hover()).on_hover_text(tip);
                     x += 34.0 + 2.0 + 8.0;
                 }
             }
@@ -1013,7 +1051,7 @@ impl Recorder {
             let resp = ui.interact(stop, ui.id().with("stop"), Sense::click());
             ui.painter().rect_filled(stop, CornerRadius::same(9), if resp.hovered() { Color32::from_rgb(0xff, 0x6b, 0x7a) } else { DANGER });
             ui.painter().text(stop.center(), Align2::CENTER_CENTER, "Stop", kit::font(13.0), Color32::WHITE);
-            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+            if resp.on_hover_text("Stop recording (Ctrl+Shift+R)").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                 action = Action::Stop;
             }
             let trash = Rect::from_min_size(Pos2::new(stop.min.x - 10.0 - 40.0, cy - 20.0), Vec2::splat(40.0));

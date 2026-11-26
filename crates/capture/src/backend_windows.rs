@@ -43,6 +43,8 @@ pub fn list_sources() -> Result<Sources, String> {
                 y,
                 width,
                 height,
+                physical_width: d.phys.2.max(0) as u32,
+                physical_height: d.phys.3.max(0) as u32,
                 is_main: d.is_primary,
             }
         })

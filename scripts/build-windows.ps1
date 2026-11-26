@@ -48,25 +48,18 @@ if (-not $env:LIBCLANG_PATH -and (Test-Path "C:\Program Files\LLVM\bin\libclang.
 }
 
 # Caching. target\ is kept between builds (cargo only rebuilds changed crates). sccache, when
-# installed, also caches every rustc and C/C++ compile (whisper.cpp, libopus), so a clean
-# target\ or a dependency bump doesn't recompile everything from scratch.
+# installed, caches C/C++ compiles (whisper.cpp, libopus). We don't set RUSTC_WRAPPER=sccache
+# (and clear it if inherited) because whisper-rs-sys emits >150 KB of -L flags and sccache
+# expands Cargo's @response file past Windows' 32 KB CreateProcess limit when spawning rustc.exe.
+Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue
 $sccache = (Get-Command sccache -ErrorAction SilentlyContinue).Source
 $cargoProfile = if ($Fast) { "fast" } else { "release" }
-if ($sccache -and $Fast) {
-    # incremental builds can't go through sccache for Rust; keep it for the C/C++ dependencies
-    $env:CMAKE_C_COMPILER_LAUNCHER = $sccache
-    $env:CMAKE_CXX_COMPILER_LAUNCHER = $sccache
-    $sccache = $null
-}
 if ($sccache) {
-    $env:RUSTC_WRAPPER = $sccache
     $env:CMAKE_C_COMPILER_LAUNCHER = $sccache
     $env:CMAKE_CXX_COMPILER_LAUNCHER = $sccache
     if (-not $env:SCCACHE_DIR) { $env:SCCACHE_DIR = Join-Path $env:LOCALAPPDATA "sccache" }
     if (-not $env:SCCACHE_CACHE_SIZE) { $env:SCCACHE_CACHE_SIZE = "20G" }
-    # sccache can't cache incremental builds; release builds aren't incremental anyway
-    $env:CARGO_INCREMENTAL = "0"
-    Write-Host "sccache: $sccache ($env:SCCACHE_DIR)"
+    Write-Host "sccache (C/C++): $sccache ($env:SCCACHE_DIR)"
 }
 $sw = [Diagnostics.Stopwatch]::StartNew()
 
@@ -97,3 +90,13 @@ Write-Host ("Build time: {0:mm\:ss}" -f $sw.Elapsed)
 if ($sccache) { & $sccache --show-stats | Select-String 'Cache hits|Cache misses|Compile requests' }
 Write-Host "Built $outPath"
 Write-Host "SHA-256: $((Get-FileHash $outPath -Algorithm SHA256).Hash)"
+
+$installDir = Join-Path $env:LOCALAPPDATA "Programs\ScreenCraft"
+$installExe = Join-Path $installDir "ScreenCraft.exe"
+try {
+    New-Item -ItemType Directory -Path $installDir -Force | Out-Null
+    Copy-Item -Path $exe -Destination $installExe -Force
+    Write-Host "Copied $exe -> $installExe"
+} catch {
+    Write-Warning "Could not copy to $installExe (is ScreenCraft.exe running?): $_"
+}

@@ -7,7 +7,9 @@ use screencraft_core::project::Project;
 use screencraft_engine::Package;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
+use std::sync::Arc;
 use whisper_rs::{DtwMode, DtwModelPreset, DtwParameters, FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 pub struct Caption {
@@ -28,6 +30,7 @@ pub struct Request {
     pub project: Project,
     pub model: String,
     pub language: String,
+    pub cancel: Arc<AtomicBool>,
 }
 
 /// (id, file, approximate bytes)
@@ -46,7 +49,10 @@ fn model_dir() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-fn download(tx: &Sender<CapEvent>, id: &str) -> Result<PathBuf, String> {
+fn download(tx: &Sender<CapEvent>, id: &str, cancel: &AtomicBool) -> Result<PathBuf, String> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err("cancelled".into());
+    }
     let (_, file, approx) = *MODELS.iter().find(|m| m.0 == id).ok_or_else(|| format!("unknown model {id}"))?;
     let dest = model_dir()?.join(file);
     if dest.exists() {
@@ -67,11 +73,27 @@ fn download(tx: &Sender<CapEvent>, id: &str) -> Result<PathBuf, String> {
     let mut buf = vec![0u8; 256 * 1024];
     let (mut done, mut last_pct) = (0u64, -1i64);
     loop {
-        let n = reader.read(&mut buf).map_err(|e| format!("download interrupted: {e}"))?;
+        if cancel.load(Ordering::Relaxed) {
+            drop(out);
+            let _ = std::fs::remove_file(&part);
+            return Err("cancelled".into());
+        }
+        let n = match reader.read(&mut buf) {
+            Ok(n) => n,
+            Err(e) => {
+                drop(out);
+                let _ = std::fs::remove_file(&part);
+                return Err(format!("download interrupted: {e}"));
+            }
+        };
         if n == 0 {
             break;
         }
-        out.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+        if let Err(e) = out.write_all(&buf[..n]) {
+            drop(out);
+            let _ = std::fs::remove_file(&part);
+            return Err(e.to_string());
+        }
         done += n as u64;
         let pct = (done as f64 / total as f64 * 100.0).min(100.0);
         if pct as i64 != last_pct {
@@ -106,9 +128,19 @@ fn to_16k(mono: &[f32], rate: u32) -> Vec<f32> {
     out
 }
 
+unsafe extern "C" fn abort_trampoline(user_data: *mut std::ffi::c_void) -> bool {
+    if user_data.is_null() {
+        return false;
+    }
+    unsafe { &*(user_data as *const AtomicBool) }.load(Ordering::Relaxed)
+}
+
 /// Run the model over 16 kHz mono samples. Timestamps are shifted back by `offset_ms`
 /// (the microphone clock runs `offset_ms` ahead of the recording's).
-fn recognize(model_file: &Path, pcm: &[f32], model: &str, language: &str, offset_ms: f64, on_progress: impl FnMut(i32) + 'static) -> Result<Vec<Caption>, String> {
+fn recognize(model_file: &Path, pcm: &[f32], model: &str, language: &str, offset_ms: f64, cancel: &Arc<AtomicBool>, on_progress: impl FnMut(i32) + 'static) -> Result<Vec<Caption>, String> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err("cancelled".into());
+    }
     // DTW token timestamps align each word to the audio far better than the default estimate
     let preset = match model {
         "tiny.en" => Some(DtwModelPreset::TinyEn),
@@ -124,6 +156,9 @@ fn recognize(model_file: &Path, pcm: &[f32], model: &str, language: &str, offset
         cp.dtw_parameters(DtwParameters { mode: DtwMode::ModelPreset { model_preset: p }, ..Default::default() });
     }
     let ctx = WhisperContext::new_with_params(model_file.to_str().ok_or("bad model path")?, cp).map_err(|e| format!("could not load the model: {e}"))?;
+    if cancel.load(Ordering::Relaxed) {
+        return Err("cancelled".into());
+    }
     let mut state = ctx.create_state().map_err(|e| e.to_string())?;
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
     let threads = std::thread::available_parallelism().map(|n| n.get() as i32).unwrap_or(4).min(8);
@@ -145,7 +180,17 @@ fn recognize(model_file: &Path, pcm: &[f32], model: &str, language: &str, offset
     params.set_split_on_word(true);
     params.set_initial_prompt("Hello, and welcome. Today, we're going to talk about something important.");
     params.set_progress_callback_safe(on_progress);
-    state.full(params, pcm).map_err(|e| format!("transcription failed: {e}"))?;
+    // NOTE: whisper-rs 0.16.0's set_abort_callback_safe has a double-box pointer mismatch in its
+    // trampoline, so bind the C trampoline directly to `cancel` (`Arc<AtomicBool>` outlives `state.full`).
+    unsafe {
+        params.set_abort_callback(Some(abort_trampoline));
+        params.set_abort_callback_user_data(Arc::as_ptr(cancel) as *mut std::ffi::c_void);
+    }
+    let full_res = state.full(params, pcm);
+    if cancel.load(Ordering::Relaxed) {
+        return Err("cancelled".into());
+    }
+    full_res.map_err(|e| format!("transcription failed: {e}"))?;
 
     let mut words: Vec<(String, f64, f64)> = Vec::new();
     for seg in state.as_iter() {
@@ -273,7 +318,10 @@ pub fn chunk(words: Vec<(String, f64, f64)>) -> Vec<Caption> {
 }
 
 /// The speech to transcribe as mono samples + rate, and the microphone's clock offset.
-fn speech_audio(package: &Package, project: &Project) -> Result<(Vec<f32>, u32, f64), String> {
+fn speech_audio(package: &Package, project: &Project, cancel: &AtomicBool) -> Result<(Vec<f32>, u32, f64), String> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err("cancelled".into());
+    }
     let m = &project.media;
     // a separate microphone file (0.3 recordings)
     if let Some(rel) = m.mic.as_deref() {
@@ -292,6 +340,9 @@ fn speech_audio(package: &Package, project: &Project) -> Result<(Vec<f32>, u32, 
     let mut mono = Vec::with_capacity((total * 48.0) as usize);
     let mut t = 0.0;
     while t < total {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("cancelled".into());
+        }
         let pcm = src.read(t, 48_000)?;
         mono.extend(pcm.chunks_exact(2).map(|f| (f[0] + f[1]) * 0.5));
         t += 1000.0;
@@ -300,14 +351,17 @@ fn speech_audio(package: &Package, project: &Project) -> Result<(Vec<f32>, u32, 
 }
 
 fn transcribe(tx: &Sender<CapEvent>, req: &Request) -> Result<Vec<Caption>, String> {
-    let model_file = download(tx, &req.model)?;
+    let model_file = download(tx, &req.model, &req.cancel)?;
     let _ = tx.send(CapEvent::Progress("Reading audio…".into()));
-    let (mono, rate, offset_ms) = speech_audio(&req.package, &req.project)?;
+    let (mono, rate, offset_ms) = speech_audio(&req.package, &req.project, &req.cancel)?;
     let pcm = to_16k(&mono, rate);
     drop(mono);
+    if req.cancel.load(Ordering::Relaxed) {
+        return Err("cancelled".into());
+    }
     let _ = tx.send(CapEvent::Progress("Loading model…".into()));
     let tx2 = tx.clone();
-    recognize(&model_file, &pcm, &req.model, &req.language, offset_ms, move |p| {
+    recognize(&model_file, &pcm, &req.model, &req.language, offset_ms, &req.cancel, move |p| {
         let _ = tx2.send(CapEvent::Progress(format!("Transcribing {p}%")));
     })
 }

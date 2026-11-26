@@ -73,8 +73,8 @@ pub fn show(st: &mut EditorState, ui: &mut Ui) {
         }
         _ => {
             if kit::btn_line(ui, "Choose image…", false).clicked() {
-                match crate::imgdata::pick_image_data_url(2560) {
-                    Ok(Some(url)) => st.edit(|p| p.config.styles.background.image = Some(url)),
+                match crate::imgdata::pick_and_save_image(&st.package.dir, "background", 2560) {
+                    Ok(Some(file)) => st.edit(|p| p.config.styles.background.image = Some(file)),
                     Ok(None) => {}
                     Err(e) => st.error = Some(e),
                 }
@@ -86,23 +86,25 @@ pub fn show(st: &mut EditorState, ui: &mut Ui) {
     let devs: Vec<(String, &str)> = DEVICES.iter().map(|(a, b)| (a.to_string(), *b)).collect();
     seg(st, ui, Some("Frame"), &devs, if styles.device.is_empty() { "none".into() } else { styles.device.clone() }, |p, v| p.config.styles.device = v);
     if bg.kind != "color" {
-        slider(st, ui, "bg-blur", "Background blur", bg.blur, (0.0, 40.0, 1.0), |v| format!("{}", v.round()), |p, v| p.config.styles.background.blur = v);
+        slider_def(st, ui, "bg-blur", "Background blur", bg.blur, (0.0, 40.0, 1.0), 0.0, |v| format!("{}", v.round()), |p, v| p.config.styles.background.blur = v);
     }
-    slider(st, ui, "padding", "Padding", styles.padding_ratio, (0.0, 0.3, 0.005), pct, |p, v| p.config.styles.padding_ratio = v);
-    slider(st, ui, "corners", "Screen Corners", styles.corner_radius, (0.0, 60.0, 1.0), |v| format!("{}", v.round()), |p, v| p.config.styles.corner_radius = v);
-    slider(st, ui, "shadow", "Shadow", styles.shadow.intensity, (0.0, 1.0, 0.01), pct, |p, v| p.config.styles.shadow.intensity = v);
+    slider_def(st, ui, "padding", "Padding", styles.padding_ratio, (0.0, 0.3, 0.005), 0.0, pct, |p, v| p.config.styles.padding_ratio = v);
+    slider_def(st, ui, "corners", "Screen Corners", styles.corner_radius, (0.0, 60.0, 1.0), 0.0, |v| format!("{}", v.round()), |p, v| p.config.styles.corner_radius = v);
+    slider_def(st, ui, "shadow", "Shadow", styles.shadow.intensity, (0.0, 1.0, 0.01), 0.3, pct, |p, v| p.config.styles.shadow.intensity = v);
     seg(st, ui, Some("Shadow style"), &[(false, "Classic"), (true, "Directional")], styles.shadow.directional, |p, v| p.config.styles.shadow.directional = v);
-    slider(st, ui, "sh-dist", "Shadow distance", styles.shadow.distance, (0.0, 80.0, 1.0), |v| format!("{}", v.round()), |p, v| p.config.styles.shadow.distance = v);
-    slider(st, ui, "sh-blur", "Shadow blur", styles.shadow.blur, (0.0, 60.0, 1.0), |v| format!("{}", v.round()), |p, v| p.config.styles.shadow.blur = v);
-    slider(st, ui, "sh-angle", "Shadow angle", styles.shadow.angle, (0.0, 360.0, 1.0), deg, |p, v| p.config.styles.shadow.angle = v);
+    slider_def(st, ui, "sh-dist", "Shadow distance", styles.shadow.distance, (0.0, 80.0, 1.0), 25.0, |v| format!("{}", v.round()), |p, v| p.config.styles.shadow.distance = v);
+    slider_def(st, ui, "sh-blur", "Shadow blur", styles.shadow.blur, (0.0, 60.0, 1.0), 20.0, |v| format!("{}", v.round()), |p, v| p.config.styles.shadow.blur = v);
+    if styles.shadow.directional {
+        slider_def(st, ui, "sh-angle", "Shadow angle", styles.shadow.angle, (0.0, 360.0, 1.0), 45.0, deg, |p, v| p.config.styles.shadow.angle = v);
+    }
 
     // watermark: a logo over the whole video
     let wm = st.project.config.watermark.clone();
     kit::h3(ui, "Watermark", false);
     if kit::btn_line(ui, if wm.image.is_empty() { "Choose image…" } else { "Change image…" }, false).clicked() {
-        match crate::imgdata::pick_image_data_url(1024) {
-            Ok(Some(url)) => st.edit(|p| {
-                p.config.watermark.image = url;
+        match crate::imgdata::pick_and_save_image(&st.package.dir, "watermark", 1024) {
+            Ok(Some(file)) => st.edit(|p| {
+                p.config.watermark.image = file;
                 p.config.watermark.enabled = true;
             }),
             Ok(None) => {}

@@ -4,7 +4,9 @@ use crate::editor::{ops, Sel};
 use crate::srt;
 use crate::theme::fmt_time;
 use crate::whisper::{CapEvent, Caption};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
+use std::sync::Arc;
 
 /// Style presets; position and width are left as the user set them, except TikTok's own.
 pub fn preset(name: &str, s: &mut screencraft_core::project::SubtitleStyle) {
@@ -52,13 +54,28 @@ pub struct CapState {
     pub language: String,
     pub busy: bool,
     pub msg: String,
+    pub cancel: Arc<AtomicBool>,
     pub rx: Option<Receiver<CapEvent>>,
     pub done: Option<Result<Vec<Caption>, String>>,
 }
 
 impl Default for CapState {
     fn default() -> Self {
-        Self { model: "small.en".into(), language: "auto".into(), busy: false, msg: String::new(), rx: None, done: None }
+        Self {
+            model: "small.en".into(),
+            language: "auto".into(),
+            busy: false,
+            msg: String::new(),
+            cancel: Arc::new(AtomicBool::new(false)),
+            rx: None,
+            done: None,
+        }
+    }
+}
+
+impl Drop for CapState {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
     }
 }
 
@@ -114,11 +131,15 @@ pub fn show(st: &mut EditorState, ui: &mut Ui) {
         }
     }
     let busy = st.panel.caps.busy;
-    if ui.add_enabled_ui(!busy, |ui| kit::btn_line(ui, if busy { "Working…" } else { "Generate captions" }, false)).inner.clicked() && !busy {
-        st.start_captions();
-    }
     if busy {
+        let stopping = st.panel.caps.cancel.load(Ordering::Relaxed);
+        if kit::btn_line(ui, if stopping { "Stopping…" } else { "Stop generating" }, true).clicked() && !stopping {
+            st.panel.caps.cancel.store(true, Ordering::Relaxed);
+            st.panel.caps.msg = "Stopping…".into();
+        }
         kit::hint(ui, &st.panel.caps.msg.clone());
+    } else if kit::btn_line(ui, "Generate captions", false).clicked() {
+        st.start_captions();
     }
     kit::hint(ui, "Speech recognition by whisper.cpp (github.com/ggml-org/whisper.cpp, MIT) with OpenAI Whisper models (MIT).");
     let w = (ui.available_width() - 12.0) / 3.0;
@@ -139,7 +160,7 @@ pub fn show(st: &mut EditorState, ui: &mut Ui) {
     let multi = st.selected_caption_ids();
     if cap.is_some() && multi.len() > 1 {
         kit::h3(ui, &format!("{} captions selected", multi.len()), false);
-        kit::hint(ui, "Drag any selected caption to move them all together. ⌘ / Ctrl-click adds or removes one, Shift-click selects a range, ⌘ / Ctrl + A selects all.");
+        kit::hint(ui, "Drag any selected caption to move them all together. Ctrl-click adds or removes one, Shift-click selects a range, Ctrl+A selects all.");
         if kit::btn_line(ui, &format!("Delete {} captions", multi.len()), true).clicked() {
             st.delete_selected();
         }

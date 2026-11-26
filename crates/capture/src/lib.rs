@@ -47,6 +47,10 @@ pub struct DisplayInfo {
     pub y: f64,
     pub width: f64,
     pub height: f64,
+    #[serde(default)]
+    pub physical_width: u32,
+    #[serde(default)]
+    pub physical_height: u32,
     pub is_main: bool,
 }
 

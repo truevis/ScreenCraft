@@ -50,6 +50,8 @@ pub fn list_sources() -> Result<Sources, String> {
                 y: f.origin.y,
                 width: f.size.width,
                 height: f.size.height,
+                physical_width: 0,
+                physical_height: 0,
                 is_main,
             }
         })

@@ -141,7 +141,9 @@ impl VideoSource {
             Some(l) if l < idx && idx - l <= 90 && self.no_key_between(l + 1, idx) => l + 1,
             _ => {
                 let k = self.keyframe_at_or_before(idx);
-                self.decoder = H264Decoder::new(&self.params, self.length_size).map_err(|e| e.to_string())?;
+                if self.last_decoded.is_some() && self.decoder.flush().is_err() {
+                    self.decoder = H264Decoder::new(&self.params, self.length_size).map_err(|e| e.to_string())?;
+                }
                 k
             }
         };

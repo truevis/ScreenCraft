@@ -2,6 +2,7 @@ use super::*;
 
 pub fn show(st: &mut EditorState, ui: &mut Ui) {
     kit::h3(ui, "Crop", true);
+    note(ui, "Drag the handles on the preview or adjust the edges below.");
     let c = st.project.config.crop;
     let vals = [
         ("Left", "l", c.x * 100.0),
@@ -12,7 +13,7 @@ pub fn show(st: &mut EditorState, ui: &mut Ui) {
     let mut v = [vals[0].2, vals[1].2, vals[2].2, vals[3].2];
     let mut changed = false;
     for (i, (name, _, _)) in vals.iter().enumerate() {
-        changed |= kit::slider(ui, name, &mut v[i], 0.0, 60.0, 0.5, |n| format!("{n:.1}%"));
+        changed |= kit::slider_default(ui, name, &mut v[i], 0.0, 60.0, 0.5, Some(0.0), |n| format!("{n:.1}%"));
     }
     if changed {
         st.edit_keyed(Some("crop"), |p| {

@@ -23,7 +23,6 @@ pub struct PanelState {
     pub space_was_playing: bool,
     pub pace: pace::PaceOpts,
     pub caps: captions::CapState,
-    pub audio: audio::AudioState,
 }
 
 impl Default for PanelState {
@@ -34,7 +33,6 @@ impl Default for PanelState {
             space_was_playing: false,
             pace: pace::PaceOpts::default(),
             caps: captions::CapState::default(),
-            audio: audio::AudioState::default(),
         }
     }
 }
@@ -75,6 +73,23 @@ pub fn slider(
 ) {
     let mut v = cur;
     if kit::slider(ui, label, &mut v, min, max, step, fmt) {
+        st.edit_keyed(Some(key), |p| set(p, v));
+    }
+}
+
+pub fn slider_def(
+    st: &mut EditorState,
+    ui: &mut Ui,
+    key: &str,
+    label: &str,
+    cur: f64,
+    (min, max, step): (f64, f64, f64),
+    default: f64,
+    fmt: impl Fn(f64) -> String,
+    set: impl FnOnce(&mut Project, f64),
+) {
+    let mut v = cur;
+    if kit::slider_default(ui, label, &mut v, min, max, step, Some(default), fmt) {
         st.edit_keyed(Some(key), |p| set(p, v));
     }
 }

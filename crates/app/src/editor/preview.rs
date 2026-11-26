@@ -23,6 +23,7 @@ pub struct Reply {
 pub struct PreviewWorker {
     tx: Sender<Option<Want>>,
     rx: Receiver<Result<Reply, String>>,
+    handle: Option<std::thread::JoinHandle<()>>,
     pub requested: Option<(usize, Option<usize>, Option<usize>)>,
     pub has_camera: bool,
 }
@@ -32,7 +33,7 @@ impl PreviewWorker {
         let (tx, req_rx) = channel::<Option<Want>>();
         let (reply_tx, rx) = channel::<Result<Reply, String>>();
         let (cam_tx, cam_rx) = channel::<bool>();
-        std::thread::Builder::new()
+        let handle = std::thread::Builder::new()
             .name("screencraft-preview".into())
             .spawn(move || {
                 let mut source = match MultiSource::open(&package, &project) {
@@ -63,7 +64,7 @@ impl PreviewWorker {
             })
             .expect("preview thread");
         let has_camera = cam_rx.recv().unwrap_or(false);
-        Self { tx, rx, requested: None, has_camera }
+        Self { tx, rx, handle: Some(handle), requested: None, has_camera }
     }
 
     pub fn request(&mut self, want: Want) {
@@ -86,5 +87,8 @@ impl PreviewWorker {
 impl Drop for PreviewWorker {
     fn drop(&mut self) {
         let _ = self.tx.send(None);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
     }
 }

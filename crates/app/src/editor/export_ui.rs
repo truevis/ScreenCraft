@@ -55,6 +55,14 @@ pub struct ExportState {
     finished: Option<Result<(PathBuf, String), String>>,
 }
 
+impl ExportState {
+    pub fn cancel(&mut self) {
+        if let Some(j) = &self.job {
+            j.cancel.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
 pub fn default_codec() -> VideoCodec {
     if available_video_codecs().contains(&VideoCodec::H264) {
         VideoCodec::H264
@@ -150,16 +158,10 @@ fn dialog_btn(ui: &mut egui::Ui, text: &str, primary: bool) -> bool {
     }
 }
 
-pub fn show(st: &mut EditorState, ctx: &egui::Context) {
+pub fn show(st: &mut EditorState, ctx: &egui::Context, prefs: &mut crate::prefs::Prefs) {
     if !st.export.open && st.export.job.is_none() && st.export.finished.is_none() {
         return;
     }
-    // dim the editor behind the dialog
-    let screen = ctx.content_rect();
-    egui::Area::new(egui::Id::new("export-dim")).order(egui::Order::Middle).fixed_pos(screen.min).show(ctx, |ui| {
-        ui.allocate_rect(screen, Sense::click());
-        ui.painter().rect_filled(screen, 0.0, Color32::from_rgba_unmultiplied(4, 7, 12, 168));
-    });
     let mut start: Option<PathBuf> = None;
     let mut cancel = false;
     let mut close = false;
@@ -168,21 +170,7 @@ pub fn show(st: &mut EditorState, ctx: &egui::Context) {
     let has_audio = st.project.media.has_microphone || st.project.media.has_system_audio || st.project.media.mic.is_some() || !st.project.scene.music_clips.is_empty();
     let compress_ok = cfg!(any(target_os = "macos", target_os = "windows"));
 
-    egui::Window::new("Export")
-        .title_bar(false)
-        .collapsible(false)
-        .resizable(false)
-        .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
-        .frame(
-            egui::Frame::new()
-                .fill(PANEL)
-                .stroke(Stroke::new(1.0, LINE_2))
-                .corner_radius(CornerRadius::same(12))
-                .inner_margin(egui::Margin::same(22))
-                .shadow(egui::Shadow { offset: [0, 24], blur: 70, spread: 0, color: Color32::from_black_alpha(140) }),
-        )
-        .fixed_size(Vec2::new(426.0, 0.0))
-        .show(ctx, |ui| {
+    let _ = kit::modal(ctx, "Export", 426.0, PANEL, egui::Margin::same(22), 168, |ui| {
             ui.spacing_mut().item_spacing = Vec2::new(8.0, 0.0);
             ui.label(egui::RichText::new("Export").size(16.0).strong().color(TEXT));
             ui.add_space(12.0);
@@ -220,6 +208,9 @@ pub fn show(st: &mut EditorState, ctx: &egui::Context) {
                             if dialog_btn(ui, "Show in folder", false) {
                                 super::dialogs::reveal(path);
                             }
+                            if dialog_btn(ui, "Open video", false) {
+                                let _ = super::open_url(&path.to_string_lossy());
+                            }
                         });
                     }
                     Err(e) => {
@@ -236,7 +227,9 @@ pub fn show(st: &mut EditorState, ctx: &egui::Context) {
             }
 
             let ex = &mut st.export;
-            ex.format = Format::Mp4;
+            row(ui, "Format", None, |ui| {
+                kit::segmented(ui, None, &[(Format::Mp4, "MP4"), (Format::Gif, "GIF"), (Format::WebM, "WebM")], &mut ex.format);
+            });
             row(ui, "Resolution", None, |ui| {
                 kit::segmented(ui, None, &[(720u32, "720p"), (1080, "1080p"), (1440, "1440p"), (2160, "4K")], &mut ex.resolution);
             });
@@ -265,7 +258,7 @@ pub fn show(st: &mut EditorState, ctx: &egui::Context) {
                 });
                 if ex.format == Format::Mp4 && compress_ok {
                     row(ui, "Compress after export", Some("Re-encodes the finished file to make it smaller"), |ui| {
-                        toggle(ui, &mut ex.compress);
+                        kit::toggle(ui, &mut ex.compress);
                     });
                     if ex.compress {
                         row(ui, "Compression", None, |ui| {
@@ -330,7 +323,7 @@ pub fn show(st: &mut EditorState, ctx: &egui::Context) {
                         Format::Gif => "gif",
                     };
                     let mut dlg = rfd::FileDialog::new().set_file_name(format!("{}.{ext}", st.project.name)).add_filter(ext.to_uppercase(), &[ext]);
-                    if let Some(d) = crate::prefs::Prefs::load().export_dir.or_else(|| st.package.dir.parent().map(|d| d.to_path_buf())) {
+                    if let Some(d) = prefs.export_dir.clone().or_else(|| st.package.dir.parent().map(|d| d.to_path_buf())) {
                         dlg = dlg.set_directory(d);
                     }
                     if let Some(path) = dlg.save_file() {
@@ -344,7 +337,7 @@ pub fn show(st: &mut EditorState, ctx: &egui::Context) {
         });
 
     if let Some(path) = start {
-        launch(st, ctx, path);
+        launch(st, ctx, path, prefs);
     }
     if cancel {
         if let Some(j) = &st.export.job {
@@ -361,16 +354,6 @@ pub fn show(st: &mut EditorState, ctx: &egui::Context) {
     }
 }
 
-fn toggle(ui: &mut egui::Ui, v: &mut bool) {
-    let (r, resp) = ui.allocate_exact_size(Vec2::new(36.0, 20.0), Sense::click());
-    ui.painter().rect_filled(r, CornerRadius::same(6), if *v { ACCENT } else { LINE_2 });
-    let kx = r.min.x + 3.0 + if *v { 16.0 } else { 0.0 };
-    ui.painter().rect_filled(Rect::from_min_size(Pos2::new(kx, r.min.y + 3.0), Vec2::splat(14.0)), CornerRadius::same(4), Color32::WHITE);
-    if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-        *v = !*v;
-    }
-}
-
 fn bar(ui: &mut egui::Ui, v: f32) {
     ui.add_space(16.0);
     let (r, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 6.0), Sense::hover());
@@ -382,7 +365,9 @@ fn strip_ext(p: &Path) -> PathBuf {
     p.with_extension("")
 }
 
-fn launch(st: &mut EditorState, ctx: &egui::Context, path: PathBuf) {
+fn launch(st: &mut EditorState, ctx: &egui::Context, path: PathBuf, prefs: &mut crate::prefs::Prefs) {
+    prefs.export_dir = path.parent().map(Path::to_path_buf);
+    prefs.save();
     let ex = &st.export;
     let (w, h) = screencraft_render::output_size(&st.project, ex.resolution);
     let format = ex.format;

@@ -74,7 +74,7 @@ pub fn show(st: &mut EditorState, ui: &mut Ui) {
     // shortcut display
     let ks = st.project.config.keystrokes.clone();
     kit::h3(ui, "Shortcut display", false);
-    toggle(st, ui, "Show shortcuts", Some("Pops up keys like ⌘C or Esc as you press them. Only recordings made after this feature was added carry shortcut data."), ks.enabled, |p, v| p.config.keystrokes.enabled = v);
+    toggle(st, ui, "Show shortcuts", Some("Pops up keys like Ctrl+C or Esc as you press them. Only recordings made after this feature was added carry shortcut data."), ks.enabled, |p, v| p.config.keystrokes.enabled = v);
     if ks.enabled {
         let pos: Vec<(String, &str)> = vec![("bottom-center".into(), "Bottom"), ("bottom-left".into(), "Left"), ("bottom-right".into(), "Right"), ("top-center".into(), "Top")];
         seg(st, ui, Some("Position"), &pos, ks.position.clone(), |p, v| p.config.keystrokes.position = v);

@@ -18,23 +18,44 @@ pub fn fit_text(ui: &Ui, text: &str, size: f32, max_w: f32) -> String {
     if text_width(ui, text, size) <= max_w {
         return text.to_string();
     }
-    let mut s: String = text.to_string();
-    while !s.is_empty() && text_width(ui, &format!("{s}…"), size) > max_w {
-        s.pop();
+    let offsets: Vec<usize> = text.char_indices().map(|(i, _)| i).collect();
+    let (mut lo, mut hi) = (0usize, offsets.len());
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        let cand = format!("{}…", &text[..offsets[mid - 1]]);
+        if text_width(ui, &cand, size) <= max_w {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
     }
-    format!("{}…", s.trim_end())
+    if lo == 0 {
+        "…".to_string()
+    } else {
+        format!("{}…", text[..offsets[lo - 1]].trim_end())
+    }
 }
 
 /// Text with CSS-style letter spacing; returns its width.
 pub fn spaced_text(ui: &Ui, pos: Pos2, text: &str, size: f32, color: Color32, spacing: f32) -> f32 {
-    let mut x = pos.x;
-    for ch in text.chars() {
-        let g = ui.painter().layout_no_wrap(ch.to_string(), font(size), color);
-        let w = g.size().x;
-        ui.painter().galley(Pos2::new(x, pos.y), g, color);
-        x += w + spacing;
+    if text.is_empty() {
+        return 0.0;
     }
-    x - pos.x
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        text,
+        0.0,
+        egui::TextFormat {
+            font_id: font(size),
+            color,
+            extra_letter_spacing: spacing,
+            ..Default::default()
+        },
+    );
+    let g = ui.painter().layout_job(job);
+    let w = g.size().x;
+    ui.painter().galley(pos, g, color);
+    w
 }
 
 /// Section heading inside a panel (`#panel h3`).
@@ -65,16 +86,93 @@ fn field_label(ui: &mut Ui, label: &str, value: Option<&str>) {
     }
 }
 
-/// `<input type=range>` with the 0.3 track and square thumb. Returns true when the value changed.
+fn parse_slider_input(raw: &str, max: f64, fmt_str: &str) -> Option<f64> {
+    let trimmed = raw.trim();
+    let has_pct = trimmed.ends_with('%');
+    let num_str = trimmed.trim_end_matches(|c: char| !c.is_ascii_digit() && c != '.' && c != '-' && c != '+').trim();
+    let val: f64 = num_str.parse().ok()?;
+    if (has_pct || fmt_str.contains('%')) && max <= 1.5 {
+        Some(val / 100.0)
+    } else {
+        Some(val)
+    }
+}
+
+/// `<input type=range>` with accent progress fill, click-to-type value label, keyboard arrows,
+/// and optional double-click reset. Returns true when the value changed.
 pub fn slider(ui: &mut Ui, label: &str, v: &mut f64, min: f64, max: f64, step: f64, fmt: impl Fn(f64) -> String) -> bool {
+    slider_default(ui, label, v, min, max, step, None, fmt)
+}
+
+pub fn slider_default(ui: &mut Ui, label: &str, v: &mut f64, min: f64, max: f64, step: f64, default: Option<f64>, fmt: impl Fn(f64) -> String) -> bool {
     ui.add_space(6.0);
-    field_label(ui, label, Some(&fmt(*v)));
+    let mut changed = false;
+    let formatted = fmt(*v);
+    let edit_id = ui.id().with(("slider-edit", label));
+    let mut editing: Option<String> = ui.ctx().memory_mut(|m| m.data.get_temp(edit_id));
+    {
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 18.0), Sense::hover());
+        ui.painter().text(rect.left_center(), Align2::LEFT_CENTER, label, font(13.0), LABEL);
+        let vw = (text_width(ui, &formatted, 13.0) + 10.0).max(48.0).min(rect.width() * 0.5);
+        let val_rect = Rect::from_min_max(Pos2::new(rect.max.x - vw, rect.min.y), rect.max);
+        if let Some(buf) = editing.as_mut() {
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(val_rect));
+            let te = child.add_sized(val_rect.size(), egui::TextEdit::singleline(buf).font(font(12.5)).horizontal_align(egui::Align::RIGHT).margin(egui::Margin::symmetric(4, 1)));
+            te.request_focus();
+            let esc = ui.ctx().input(|i| i.key_pressed(egui::Key::Escape));
+            let enter = ui.ctx().input(|i| i.key_pressed(egui::Key::Enter));
+            if esc {
+                editing = None;
+            } else if enter || te.lost_focus() {
+                if let Some(mut nv) = parse_slider_input(buf, max, &formatted) {
+                    if step > 0.0 {
+                        nv = (nv / step).round() * step;
+                    }
+                    nv = nv.clamp(min, max);
+                    if (nv - *v).abs() > f64::EPSILON {
+                        *v = nv;
+                        changed = true;
+                    }
+                }
+                editing = None;
+            }
+        } else {
+            let vr = ui.interact(val_rect, edit_id.with("val"), Sense::click());
+            let col = if vr.hovered() { Color32::WHITE } else { ACCENT_2 };
+            ui.painter().text(rect.right_center(), Align2::RIGHT_CENTER, &formatted, font(13.0), col);
+            if vr.on_hover_text("Click to enter exact value").on_hover_cursor(egui::CursorIcon::Text).clicked() {
+                let initial = if formatted.contains('%') && max <= 1.5 {
+                    format!("{}", (*v * 100.0).round())
+                } else {
+                    format!("{}", (*v * 1000.0).round() / 1000.0)
+                };
+                editing = Some(initial);
+            }
+        }
+    }
+    ui.ctx().memory_mut(|m| match editing {
+        Some(s) => {
+            m.data.insert_temp(edit_id, s);
+        }
+        None => {
+            m.data.remove::<String>(edit_id);
+        }
+    });
+
     ui.add_space(1.0);
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 18.0), Sense::click_and_drag());
     let (tw, half) = (14.0, 7.0);
     let track = Rect::from_min_max(Pos2::new(rect.min.x, rect.center().y - 2.0), Pos2::new(rect.max.x, rect.center().y + 2.0));
-    let mut changed = false;
-    if resp.dragged() || resp.clicked() || resp.drag_started() {
+    if resp.double_clicked() {
+        if let Some(def) = default {
+            let nv = def.clamp(min, max);
+            if (nv - *v).abs() > f64::EPSILON {
+                *v = nv;
+                changed = true;
+            }
+        }
+    } else if resp.dragged() || resp.clicked() || resp.drag_started() {
+        resp.request_focus();
         if let Some(p) = resp.interact_pointer_pos() {
             let t = ((p.x - rect.min.x - half) / (rect.width() - tw)).clamp(0.0, 1.0) as f64;
             let mut nv = min + (max - min) * t;
@@ -88,19 +186,73 @@ pub fn slider(ui: &mut Ui, label: &str, v: &mut f64, min: f64, max: f64, step: f
             }
         }
     }
+    if resp.has_focus() {
+        let inc = if step > 0.0 { step } else { (max - min) / 50.0 };
+        let mult = if ui.ctx().input(|i| i.modifiers.shift) { 10.0 } else { 1.0 };
+        let delta = ui.ctx().input(|i| {
+            if i.key_pressed(egui::Key::ArrowRight) || i.key_pressed(egui::Key::ArrowUp) {
+                Some(inc * mult)
+            } else if i.key_pressed(egui::Key::ArrowLeft) || i.key_pressed(egui::Key::ArrowDown) {
+                Some(-inc * mult)
+            } else {
+                None
+            }
+        });
+        if let Some(d) = delta {
+            let nv = (*v + d).clamp(min, max);
+            if (nv - *v).abs() > f64::EPSILON {
+                *v = nv;
+                changed = true;
+            }
+        }
+        if let Some(def) = default {
+            if ui.ctx().input(|i| i.key_pressed(egui::Key::Backspace) || i.key_pressed(egui::Key::Delete)) {
+                let nv = def.clamp(min, max);
+                if (nv - *v).abs() > f64::EPSILON {
+                    *v = nv;
+                    changed = true;
+                }
+            }
+        }
+    }
     let t = if max > min { ((*v - min) / (max - min)).clamp(0.0, 1.0) as f32 } else { 0.0 };
     let cx = rect.min.x + half + t * (rect.width() - tw);
     ui.painter().rect_filled(track, CornerRadius::same(2), LINE_2);
+    if cx > track.min.x {
+        ui.painter().rect_filled(Rect::from_min_max(track.min, Pos2::new(cx, track.max.y)), CornerRadius::same(2), ACCENT);
+    }
     let thumb = Rect::from_center_size(Pos2::new(cx, rect.center().y), Vec2::splat(tw));
-    let col = if resp.hovered() || resp.dragged() { Color32::WHITE } else { ACCENT_2 };
+    let col = if resp.hovered() || resp.dragged() || resp.has_focus() { Color32::WHITE } else { ACCENT_2 };
     ui.painter().rect_filled(thumb.expand(1.0), CornerRadius::same(5), ACCENT_2);
     ui.painter().rect_filled(thumb, CornerRadius::same(4), BG);
     ui.painter().rect_filled(thumb.shrink(2.0), CornerRadius::same(3), col);
+    let resp = if default.is_some() {
+        resp.on_hover_text("Drag, click value to type, or double-click to reset")
+    } else {
+        resp
+    };
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     ui.add_space(6.0);
     changed
+}
+
+fn paint_toggle(painter: &egui::Painter, rect: Rect, on: bool) {
+    painter.rect_filled(rect, CornerRadius::same(6), if on { ACCENT } else { LINE_2 });
+    let kx = rect.min.x + 3.0 + if on { 16.0 } else { 0.0 };
+    painter.rect_filled(Rect::from_min_size(Pos2::new(kx, rect.min.y + 3.0), Vec2::splat(14.0)), CornerRadius::same(4), Color32::WHITE);
+}
+
+/// Bare 36x20 switch toggle, returning true when clicked.
+pub fn toggle(ui: &mut Ui, v: &mut bool) -> bool {
+    let (r, resp) = ui.allocate_exact_size(Vec2::new(36.0, 20.0), Sense::click());
+    paint_toggle(ui.painter(), r, *v);
+    if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+        *v = !*v;
+        return true;
+    }
+    false
 }
 
 /// `.row-t` with a 36x20 toggle.
@@ -118,9 +270,7 @@ pub fn toggle_row(ui: &mut Ui, label: &str, hint_text: Option<&str>, v: &mut boo
         ui.painter().galley(Pos2::new(top.x, top.y + galley.size().y + 2.0), g, MUTED);
     }
     let tg = Rect::from_min_size(Pos2::new(rect.max.x - 36.0, rect.center().y - 10.0), Vec2::new(36.0, 20.0));
-    ui.painter().rect_filled(tg, CornerRadius::same(6), if *v { ACCENT } else { LINE_2 });
-    let kx = tg.min.x + 3.0 + if *v { 16.0 } else { 0.0 };
-    ui.painter().rect_filled(Rect::from_min_size(Pos2::new(kx, tg.min.y + 3.0), Vec2::splat(14.0)), CornerRadius::same(4), Color32::WHITE);
+    paint_toggle(ui.painter(), tg, *v);
     ui.add_space(6.0);
     if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
         *v = !*v;
@@ -299,6 +449,23 @@ pub fn primary(ui: &mut Ui, icon: Option<&str>, text: &str) -> Response {
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// Destructive call to action (red fill, white label).
+pub fn danger(ui: &mut Ui, icon: Option<&str>, text: &str) -> Response {
+    let tw = text_width(ui, text, 13.0);
+    let w = 30.0 + tw + if icon.is_some() { 25.0 } else { 0.0 };
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 34.0), Sense::click());
+    let bg = if resp.hovered() { mix(DANGER, Color32::WHITE, 0.14) } else { DANGER };
+    ui.painter().rect_filled(rect, CornerRadius::same(7), bg);
+    ui.painter().rect_stroke(rect, CornerRadius::same(7), Stroke::new(1.0, Color32::from_white_alpha(41)), StrokeKind::Inside);
+    let mut x = rect.min.x + 15.0;
+    if let Some(i) = icon {
+        icons::paint(ui, i, Rect::from_center_size(Pos2::new(x + 9.0, rect.center().y), Vec2::splat(18.0)), Color32::WHITE);
+        x += 25.0;
+    }
+    ui.painter().text(Pos2::new(x, rect.center().y), Align2::LEFT_CENTER, text, font(13.0), Color32::WHITE);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 /// `.icon-btn`: 32x32 ghost button.
 pub fn icon_btn(ui: &mut Ui, name: &str, tip: &str) -> Response {
     icon_btn_sized(ui, name, tip, 32.0, 18.0, true)
@@ -400,4 +567,35 @@ pub fn select(ui: &mut Ui, id: &str, current: &str, items: &[&str], min_w: f32) 
         }
     });
     out
+}
+
+/// Dim the backdrop and show a centered frameless modal window. Returns `true` when the backdrop
+/// itself was clicked.
+pub fn modal(ctx: &egui::Context, id: &str, width: f32, fill: Color32, margin: egui::Margin, dim_alpha: u8, content: impl FnOnce(&mut Ui)) -> bool {
+    let screen = ctx.content_rect();
+    let mut outside = false;
+    egui::Area::new(egui::Id::new((id, "dim"))).order(egui::Order::Middle).fixed_pos(screen.min).show(ctx, |ui| {
+        let r = ui.allocate_rect(screen, Sense::click());
+        ui.painter().rect_filled(screen, 0.0, Color32::from_rgba_unmultiplied(4, 7, 12, dim_alpha));
+        if r.clicked() {
+            outside = true;
+        }
+    });
+    egui::Window::new(id)
+        .title_bar(false)
+        .collapsible(false)
+        .resizable(false)
+        .order(egui::Order::Foreground)
+        .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+        .fixed_size(Vec2::new(width, 0.0))
+        .frame(
+            egui::Frame::new()
+                .fill(fill)
+                .stroke(Stroke::new(1.0, LINE_2))
+                .corner_radius(CornerRadius::same(12))
+                .inner_margin(margin)
+                .shadow(egui::Shadow { offset: [0, 24], blur: 70, spread: 0, color: Color32::from_black_alpha(140) }),
+        )
+        .show(ctx, content);
+    outside
 }

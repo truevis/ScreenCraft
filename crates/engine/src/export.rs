@@ -11,7 +11,7 @@ use screencraft_encode::{
     AudioConfig, Container, Effort, ExportSettings, ExportSummary, FileSink, HwPreference, ThreadedExporter, VideoCodec,
     VideoConfig,
 };
-use screencraft_render::{build_scene, build_scene_with, output_size, CamOverride, Compositor, Slot};
+use screencraft_render::{build_scene_in, output_size, CamOverride, Compositor, ReadbackTicket, Slot};
 use std::path::Path;
 use std::sync::mpsc::sync_channel;
 use std::sync::Arc;
@@ -349,35 +349,49 @@ pub(crate) fn upload_frames(gpu: &mut Compositor, frames: &crate::source::Frames
     }
 }
 
-/// Render frame `i`, blending sub-frames across the camera's motion when `blur` > 0 (a port of the
-/// 0.3 exporter's motion blur).
-pub(crate) fn render_frame(gpu: &mut Compositor, project: &Project, track: &screencraft_core::track::RenderTrack, i: usize, out: (u32, u32), blur: f64) -> Result<Vec<u8>, String> {
+/// Render frame `i` onto `gpu`'s target texture, accumulating motion-blur sub-frames on the GPU
+/// when `blur` > 0.
+pub(crate) fn render_frame_gpu(
+    gpu: &mut Compositor,
+    project: &Project,
+    track: &screencraft_core::track::RenderTrack,
+    i: usize,
+    out: (u32, u32),
+    blur: f64,
+    base_dir: Option<&Path>,
+) {
     let cam = CamOverride::at(track, i);
     let prev = CamOverride::at(track, i.saturating_sub(1));
     let next = CamOverride::at(track, (i + 1).min(track.count.saturating_sub(1)));
     let motion = (next.zoom - prev.zoom).abs() * 4.0 + (next.cx - prev.cx).abs() * 12.0 + (next.cy - prev.cy).abs() * 12.0;
     if blur > 0.0 && motion > 0.01 {
         let n = (2 + (motion * 40.0).round() as usize).min(6);
-        let mut acc: Vec<u8> = Vec::new();
+        let weight = 1.0 / n as f32;
         for k in 0..n {
             let f = if n == 1 { 0.0 } else { (k as f64 / (n - 1) as f64 - 0.5) * blur };
             let c = if f < 0.0 { CamOverride::lerp(cam, prev, -f) } else { CamOverride::lerp(cam, next, f) };
-            let scene = build_scene_with(project, track, i, out, Some(c));
-            gpu.render(&scene);
-            let px = gpu.read_rgba()?;
-            if k == 0 {
-                acc = px;
-            } else {
-                // running average: each sub-frame blends in with weight 1 / (k + 1)
-                for (a, b) in acc.iter_mut().zip(px.iter()) {
-                    *a = ((*a as u32 * k as u32 + *b as u32 + (k as u32 + 1) / 2) / (k as u32 + 1)) as u8;
-                }
-            }
+            let scene = build_scene_in(project, track, i, out, Some(c), base_dir);
+            gpu.accum_subframe(&scene, k == 0, weight);
         }
-        return Ok(acc);
+        gpu.resolve_accum();
+        return;
     }
-    let scene = build_scene(project, track, i, out);
+    let scene = build_scene_in(project, track, i, out, None, base_dir);
     gpu.render(&scene);
+}
+
+/// Render frame `i`, blending sub-frames across the camera's motion when `blur` > 0 (a port of the
+/// 0.3 exporter's motion blur).
+pub(crate) fn render_frame(
+    gpu: &mut Compositor,
+    project: &Project,
+    track: &screencraft_core::track::RenderTrack,
+    i: usize,
+    out: (u32, u32),
+    blur: f64,
+    base_dir: Option<&Path>,
+) -> Result<Vec<u8>, String> {
+    render_frame_gpu(gpu, project, track, i, out, blur, base_dir);
     gpu.read_rgba()
 }
 
@@ -455,16 +469,46 @@ pub fn export_project(
             Ok(())
         });
         let mut produce = || -> Result<(), String> {
+            let blur = project.config.animations.motion_blur.min(1.0);
+            let mut pending: Option<(usize, ReadbackTicket)> = None;
+            let mut conv_alive = true;
             for i in 0..track.count {
-                let frames = frx.recv().map_err(|_| "decoder stopped".to_string())??;
+                let frames = match frx.recv() {
+                    Ok(Ok(f)) => f,
+                    Ok(Err(e)) => {
+                        if let Some((_, t)) = pending.take() {
+                            let _ = gpu.finish_readback(t);
+                        }
+                        return Err(e);
+                    }
+                    Err(_) => {
+                        if let Some((_, t)) = pending.take() {
+                            let _ = gpu.finish_readback(t);
+                        }
+                        return Err("decoder stopped".to_string());
+                    }
+                };
                 upload_frames(&mut gpu, &frames);
-                let rgba = render_frame(&mut gpu, project, &track, i, (w, h), project.config.animations.motion_blur.min(1.0))?;
-                if rtx.send((i, rgba)).is_err() {
-                    break; // the converter stopped; its error is collected below
+                render_frame_gpu(&mut gpu, project, &track, i, (w, h), blur, Some(&package.dir));
+                let ticket = gpu.begin_readback(i % 2)?;
+                if let Some((prev_i, prev_ticket)) = pending.take() {
+                    let rgba = gpu.finish_readback(prev_ticket)?;
+                    if rtx.send((prev_i, rgba)).is_err() {
+                        let _ = gpu.finish_readback(ticket);
+                        conv_alive = false;
+                        break; // the converter stopped; its error is collected below
+                    }
                 }
+                pending = Some((i, ticket));
                 if i % 4 == 0 && !progress(i as f32 / track.count as f32) {
                     cancelled = true;
                     break;
+                }
+            }
+            if let Some((last_i, last_ticket)) = pending.take() {
+                let rgba = gpu.finish_readback(last_ticket)?;
+                if conv_alive && !cancelled {
+                    let _ = rtx.send((last_i, rgba));
                 }
             }
             Ok(())

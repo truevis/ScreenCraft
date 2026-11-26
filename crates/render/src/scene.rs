@@ -7,6 +7,7 @@ use crate::wallpapers::{parse_color, wallpaper};
 use screencraft_core::input::CursorKind;
 use screencraft_core::project::{ClickEffect, Project, Rect};
 use screencraft_core::track::RenderTrack;
+use std::path::Path;
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -168,10 +169,14 @@ impl CamOverride {
 
 /// Build the scene for output frame `i` of `track`.
 pub fn build_scene(p: &Project, track: &RenderTrack, i: usize, out: (u32, u32)) -> Scene {
-    build_scene_with(p, track, i, out, None)
+    build_scene_in(p, track, i, out, None, None)
 }
 
 pub fn build_scene_with(p: &Project, track: &RenderTrack, i: usize, out: (u32, u32), cam_override: Option<CamOverride>) -> Scene {
+    build_scene_in(p, track, i, out, cam_override, None)
+}
+
+pub fn build_scene_in(p: &Project, track: &RenderTrack, i: usize, out: (u32, u32), cam_override: Option<CamOverride>, base_dir: Option<&Path>) -> Scene {
     let i = i.min(track.count.saturating_sub(1));
     let (w, h) = (out.0 as f64, out.1 as f64);
     let s = (h / 1080.0) as f32;
@@ -209,7 +214,7 @@ pub fn build_scene_with(p: &Project, track: &RenderTrack, i: usize, out: (u32, u
     } else {
         0
     };
-    let bg_image = if bg.kind == "image" { bg.image.as_deref().and_then(crate::assets::bg_image) } else { None };
+    let bg_image = if bg.kind == "image" { bg.image.as_deref().and_then(|u| crate::assets::bg_image_in(u, base_dir)) } else { None };
 
     let t_out_ms = i as f64 * 1000.0 / track.fps.max(1.0);
     let cfg = &p.config.cursor;
@@ -297,7 +302,7 @@ pub fn build_scene_with(p: &Project, track: &RenderTrack, i: usize, out: (u32, u
         t_out_ms,
         screen_alpha: geo.sa,
     };
-    let layers = overlay::build(p, &geom, &track.combos, out, g_cur.sr, corner);
+    let layers = overlay::build_in(p, &geom, &track.combos, out, g_cur.sr, corner, base_dir);
 
     Scene {
         out,
