@@ -82,22 +82,13 @@ Intel + NVIDIA graphics and high-DPI displays.
 
 ## Screenshots
 
-The editor with a generated demo recording (a synthetic "app", not real footage): the Annotate panel,
-and the six-track timeline (video, zoom, camera, notes, captions, music).
+The editor with the six-track timeline (video, zoom, camera, notes, captions, music):
 
-![The editor](docs/screenshots/editor.png)
-
-Paused inside a zoom region; the cursor and click ripple are drawn by the same shader the exporter uses.
-
-![Zoomed in the editor](docs/screenshots/editor-zoom.png)
-
-Cursor and camera-motion settings:
-
-![Cursor settings](docs/screenshots/editor-look.png)
+![The editor](docs/screenshots/editor.jpg)
 
 The recorder bar:
 
-![Recorder bar](docs/screenshots/recorder.png)
+![Recorder bar](docs/screenshots/recorder.jpg)
 
 ## What it does
 
