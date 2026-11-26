@@ -62,8 +62,22 @@ pub fn show(st: &mut EditorState, ui: &mut Ui) {
     }
 
     let list = st.project.scene.annotations.clone();
+    let sel_ids = st.selected_annot_ids();
     let cur = if let Sel::Annot(id) = &st.sel { list.iter().find(|a| &a.id == id).cloned() } else { None };
-    if let Some(a) = cur {
+    if sel_ids.len() > 1 {
+        let n = sel_ids.len();
+        kit::h3(ui, &format!("{n} annotations selected"), false);
+        kit::hint(ui, "Drag any selected block on the Notes track to move them all together. Ctrl-click to toggle, Shift-click for a range, or Ctrl+A to select all.");
+        if n < list.len() && kit::btn_line(ui, "Select all annotations", false).clicked() {
+            st.select_all_annots();
+        }
+        if kit::btn_line(ui, "Clear selection", false).clicked() {
+            st.select(Sel::None);
+        }
+        if kit::btn_line(ui, &format!("Delete {n} annotations"), true).clicked() {
+            st.delete_selected();
+        }
+    } else if let Some(a) = cur {
         edit_annotation(st, ui, &a);
     } else if !list.is_empty() {
         kit::h3(ui, "On the timeline", false);

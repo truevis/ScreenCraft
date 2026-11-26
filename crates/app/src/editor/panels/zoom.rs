@@ -48,15 +48,18 @@ pub fn show(st: &mut EditorState, ui: &mut Ui) {
         if kit::btn_line(ui, "Regenerate from clicks & typing", false).clicked() {
             st.auto_zoom();
         }
+        if !st.project.scene.zooms.is_empty() && kit::btn_line(ui, "Select all zooms (Ctrl+A)", false).clicked() {
+            st.select_all_zooms();
+        }
         return;
     };
     let ids = st.selected_zoom_ids();
     let n = ids.len();
     let title = if n > 1 { format!("Zoom regions · {n} selected") } else { "Zoom region".to_string() };
     let help = if n > 1 {
-        "Showing the first region’s settings. Changing a control applies it to all selected regions."
+        "Showing the first region’s settings. Changing a control applies it to all selected regions. Ctrl-click to toggle, Shift-click for a range, or Ctrl+A to select all."
     } else {
-        "Shift-click more zoom blocks to edit several at once."
+        "Ctrl-click to toggle zooms, Shift-click to select a range, or Ctrl+A to select all."
     };
     kit::h3_help(ui, &title, true, help);
     let an = st.project.config.animations.clone();
@@ -79,6 +82,12 @@ pub fn show(st: &mut EditorState, ui: &mut Ui) {
     }
     ztoggle(st, ui, &ids, "Instant animation", Some("Apply the zoom immediately without easing."), z.instant, |r, v| r.instant = v);
     ztoggle(st, ui, &ids, "Disabled", None, z.is_disabled, |r, v| r.is_disabled = v);
+    if n < st.project.scene.zooms.len() && kit::btn_line(ui, "Select all zooms", false).clicked() {
+        st.select_all_zooms();
+    }
+    if n > 1 && kit::btn_line(ui, "Clear selection", false).clicked() {
+        st.select(Sel::None);
+    }
     let label = if n > 1 { format!("Delete {n} zooms") } else { "Delete zoom".to_string() };
     if kit::btn_line(ui, &label, true).clicked() {
         st.delete_selected();

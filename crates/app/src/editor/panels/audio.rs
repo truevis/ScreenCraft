@@ -50,23 +50,20 @@ pub fn show(st: &mut EditorState, ui: &mut Ui) {
             slider(st, ui, "duck-level", "Music while speaking", a.duck_level, (0.05, 0.8, 0.05), pct, |p, v| p.config.audio.duck_level = v);
         }
     }
+    let music_ids = st.selected_music_ids();
     let sel = if let Sel::Music(id) = &st.sel { clips.iter().find(|c| &c.id == id).cloned() } else { None };
     if let Some(c) = &sel {
         let id = c.id.clone();
-        slider(st, ui, &format!("fade-in-{id}"), "Fade in", c.fade_in_ms / 1000.0, (0.0, 5.0, 0.1), |v| format!("{v:.1} s"), {
-            let id = id.clone();
-            move |p, v| {
-                if let Some(x) = p.scene.music_clips.iter_mut().find(|x| x.id == id) {
-                    x.fade_in_ms = (v * 1000.0).round();
-                }
+        let ids_in = music_ids.clone();
+        slider(st, ui, &format!("fade-in-{id}"), "Fade in", c.fade_in_ms / 1000.0, (0.0, 5.0, 0.1), |v| format!("{v:.1} s"), move |p, v| {
+            for x in p.scene.music_clips.iter_mut().filter(|x| ids_in.contains(&x.id)) {
+                x.fade_in_ms = (v * 1000.0).round();
             }
         });
-        slider(st, ui, &format!("fade-out-{id}"), "Fade out", c.fade_out_ms / 1000.0, (0.0, 5.0, 0.1), |v| format!("{v:.1} s"), {
-            let id = id.clone();
-            move |p, v| {
-                if let Some(x) = p.scene.music_clips.iter_mut().find(|x| x.id == id) {
-                    x.fade_out_ms = (v * 1000.0).round();
-                }
+        let ids_out = music_ids.clone();
+        slider(st, ui, &format!("fade-out-{id}"), "Fade out", c.fade_out_ms / 1000.0, (0.0, 5.0, 0.1), |v| format!("{v:.1} s"), move |p, v| {
+            for x in p.scene.music_clips.iter_mut().filter(|x| ids_out.contains(&x.id)) {
+                x.fade_out_ms = (v * 1000.0).round();
             }
         });
     }
@@ -76,7 +73,11 @@ pub fn show(st: &mut EditorState, ui: &mut Ui) {
     if kit::btn_line(ui, "Add music…", false).clicked() {
         st.add_music();
     }
-    if sel.is_some() && kit::btn_line(ui, "Delete selected music clip", true).clicked() {
-        st.delete_selected();
+    if sel.is_some() {
+        let n = music_ids.len();
+        let del_label = if n > 1 { format!("Delete {n} music clips") } else { "Delete selected music clip".to_string() };
+        if kit::btn_line(ui, &del_label, true).clicked() {
+            st.delete_selected();
+        }
     }
 }

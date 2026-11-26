@@ -56,6 +56,8 @@ pub enum CloseIntent {
     Window,
     /// Another project is about to replace this one.
     Open(std::path::PathBuf),
+    /// The whole application is quitting.
+    Quit,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -506,7 +508,7 @@ impl EditorState {
         if let Some(p) = self.undo.pop() {
             let audio_changed = Self::audio_differs(&p, &self.project);
             self.redo.push(std::mem::replace(&mut self.project, p));
-            self.sel = Sel::None;
+            self.select(Sel::None);
             self.changed(audio_changed);
         }
     }
@@ -515,7 +517,7 @@ impl EditorState {
         if let Some(p) = self.redo.pop() {
             let audio_changed = Self::audio_differs(&p, &self.project);
             self.undo.push(std::mem::replace(&mut self.project, p));
-            self.sel = Sel::None;
+            self.select(Sel::None);
             self.changed(audio_changed);
         }
     }
@@ -683,9 +685,9 @@ impl EditorState {
 
     pub fn is_selected(&self, sel: &Sel) -> bool {
         &self.sel == sel
-            || match sel {
-                Sel::Zoom(id) | Sel::Caption(id) => self.multi.contains(id) && std::mem::discriminant(&self.sel) == std::mem::discriminant(sel),
-                _ => false,
+            || match sel.id() {
+                Some(id) => self.multi.iter().any(|x| x == id) && std::mem::discriminant(&self.sel) == std::mem::discriminant(sel),
+                None => false,
             }
     }
 
@@ -694,30 +696,69 @@ impl EditorState {
         self.multi.clear();
     }
 
+    pub fn set_multi_sel(&mut self, make: fn(String) -> Sel, ids: Vec<String>) {
+        if let Some(first) = ids.first().cloned() {
+            self.sel = make(first);
+            self.multi = if ids.len() > 1 { ids } else { vec![] };
+        } else {
+            self.select(Sel::None);
+        }
+    }
+
+    pub fn selected_ids(&self) -> Vec<String> {
+        if self.multi.len() > 1 {
+            self.multi.clone()
+        } else {
+            self.sel.id().map(|id| vec![id.to_string()]).unwrap_or_default()
+        }
+    }
+
     /// Ids of every selected zoom region (the first one drives the panel).
     pub fn selected_zoom_ids(&self) -> Vec<String> {
-        match &self.sel {
-            Sel::Zoom(id) => {
-                if self.multi.len() > 1 {
-                    self.multi.clone()
-                } else {
-                    vec![id.clone()]
-                }
-            }
-            _ => vec![],
+        if matches!(self.sel, Sel::Zoom(_)) {
+            self.selected_ids()
+        } else {
+            vec![]
         }
     }
 
     pub fn selected_caption_ids(&self) -> Vec<String> {
-        match &self.sel {
-            Sel::Caption(id) => {
-                if self.multi.len() > 1 {
-                    self.multi.clone()
-                } else {
-                    vec![id.clone()]
-                }
-            }
-            _ => vec![],
+        if matches!(self.sel, Sel::Caption(_)) {
+            self.selected_ids()
+        } else {
+            vec![]
+        }
+    }
+
+    pub fn selected_slice_ids(&self) -> Vec<String> {
+        if matches!(self.sel, Sel::Slice(_)) {
+            self.selected_ids()
+        } else {
+            vec![]
+        }
+    }
+
+    pub fn selected_layout_ids(&self) -> Vec<String> {
+        if matches!(self.sel, Sel::Layout(_)) {
+            self.selected_ids()
+        } else {
+            vec![]
+        }
+    }
+
+    pub fn selected_annot_ids(&self) -> Vec<String> {
+        if matches!(self.sel, Sel::Annot(_)) {
+            self.selected_ids()
+        } else {
+            vec![]
+        }
+    }
+
+    pub fn selected_music_ids(&self) -> Vec<String> {
+        if matches!(self.sel, Sel::Music(_)) {
+            self.selected_ids()
+        } else {
+            vec![]
         }
     }
 
@@ -1004,31 +1045,41 @@ impl EditorState {
 
     pub fn duplicate_selected(&mut self) {
         match self.sel.clone() {
-            Sel::Annot(id) => {
-                let nid = self.new_id("annot");
-                let n2 = nid.clone();
+            Sel::Annot(_) => {
+                let ids = self.selected_annot_ids();
+                let mut new_ids: Vec<String> = (0..ids.len()).map(|_| self.new_id("annot")).collect();
+                let mut out_ids = Vec::new();
                 self.edit(|p| {
-                    if let Some(a) = p.scene.annotations.iter().find(|x| x.id == id).cloned() {
-                        let mut c = a.clone();
-                        c.id = n2;
-                        c.x = (a.x + 0.04).min(0.9);
-                        c.y = (a.y + 0.05).min(0.9);
-                        p.scene.annotations.push(c);
+                    for id in &ids {
+                        if let Some(a) = p.scene.annotations.iter().find(|x| &x.id == id).cloned() {
+                            let nid = new_ids.pop().unwrap();
+                            let mut c = a.clone();
+                            c.id = nid.clone();
+                            c.x = (a.x + 0.04).min(0.9);
+                            c.y = (a.y + 0.05).min(0.9);
+                            p.scene.annotations.push(c);
+                            out_ids.push(nid);
+                        }
                     }
                 });
-                self.select(Sel::Annot(nid));
+                self.set_multi_sel(Sel::Annot, out_ids);
             }
-            Sel::Slice(id) => {
-                let nid = self.new_id("slice");
-                let n2 = nid.clone();
+            Sel::Slice(_) => {
+                let ids = self.selected_slice_ids();
+                let mut new_ids: Vec<String> = (0..ids.len()).map(|_| self.new_id("slice")).collect();
+                let mut out_ids = Vec::new();
                 self.edit(|p| {
-                    if let Some(i) = p.scene.slices.iter().position(|x| x.id == id) {
-                        let mut c = p.scene.slices[i].clone();
-                        c.id = n2;
-                        p.scene.slices.insert(i + 1, c);
+                    for id in &ids {
+                        if let Some(i) = p.scene.slices.iter().position(|x| &x.id == id) {
+                            let nid = new_ids.pop().unwrap();
+                            let mut c = p.scene.slices[i].clone();
+                            c.id = nid.clone();
+                            p.scene.slices.insert(i + 1, c);
+                            out_ids.push(nid);
+                        }
                     }
                 });
-                self.select(Sel::Slice(nid));
+                self.set_multi_sel(Sel::Slice, out_ids);
             }
             _ => {}
         }
@@ -1038,23 +1089,37 @@ impl EditorState {
         let sel = self.sel.clone();
         match sel {
             Sel::None => {}
-            Sel::Music(id) => self.edit(|p| p.scene.music_clips.retain(|c| c.id != id)),
+            Sel::Music(_) => {
+                let ids = self.selected_music_ids();
+                self.edit(|p| p.scene.music_clips.retain(|c| !ids.contains(&c.id)));
+            }
             Sel::Caption(_) => {
                 let ids = self.selected_caption_ids();
                 self.edit(|p| p.scene.subtitles.retain(|x| !ids.contains(&x.id)));
             }
-            Sel::Layout(id) => self.edit(|p| p.scene.camera_layouts.retain(|x| x.id != id)),
-            Sel::Annot(id) => self.edit(|p| p.scene.annotations.retain(|x| x.id != id)),
+            Sel::Layout(_) => {
+                let ids = self.selected_layout_ids();
+                self.edit(|p| p.scene.camera_layouts.retain(|x| !ids.contains(&x.id)));
+            }
+            Sel::Annot(_) => {
+                let ids = self.selected_annot_ids();
+                self.edit(|p| p.scene.annotations.retain(|x| !ids.contains(&x.id)));
+            }
             Sel::Zoom(_) => {
                 let ids = self.selected_zoom_ids();
                 self.edit(|p| p.scene.zooms.retain(|x| !ids.contains(&x.id)));
             }
-            Sel::Slice(id) => {
+            Sel::Slice(_) => {
                 if self.project.scene.slices.len() > 1 {
+                    let ids = self.selected_slice_ids();
                     self.edit(|p| {
-                        let before = p.scene.slices.clone();
-                        p.scene.slices.retain(|s| s.id != id);
-                        ops::ripple_music(p, &before, &id);
+                        let to_delete: Vec<String> = p.scene.slices.iter().rev().filter(|s| ids.contains(&s.id)).map(|s| s.id.clone()).collect();
+                        let max_del = p.scene.slices.len().saturating_sub(1);
+                        for id in to_delete.into_iter().take(max_del) {
+                            let before = p.scene.slices.clone();
+                            p.scene.slices.retain(|s| s.id != id);
+                            ops::ripple_music(p, &before, &id);
+                        }
                     });
                     let d = self.duration_ms();
                     self.seek(self.playhead_ms.min(d));
@@ -1192,20 +1257,80 @@ impl EditorState {
         }
     }
 
-    fn select_all(&mut self) {
-        if self.tab == Tab::Captions {
-            let ids: Vec<String> = self.project.scene.subtitles.iter().map(|c| c.id.clone()).collect();
-            if let Some(f) = ids.first().cloned() {
-                self.sel = Sel::Caption(f);
-                self.multi = if ids.len() > 1 { ids } else { vec![] };
-            }
-            return;
-        }
-        let ids: Vec<String> = self.project.scene.zooms.iter().map(|z| z.id.clone()).collect();
-        if let Some(f) = ids.first().cloned() {
-            self.sel = Sel::Zoom(f);
-            self.multi = if ids.len() > 1 { ids } else { vec![] };
+    pub fn select_all_zooms(&mut self) {
+        let mut items: Vec<_> = self.project.scene.zooms.iter().map(|z| (z.source_start_ms, z.id.clone())).collect();
+        items.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let ids: Vec<String> = items.into_iter().map(|(_, id)| id).collect();
+        if !ids.is_empty() {
+            self.set_multi_sel(Sel::Zoom, ids);
             self.tab = Tab::Zoom;
+        }
+    }
+
+    pub fn select_all_captions(&mut self) {
+        let mut items: Vec<_> = self.project.scene.subtitles.iter().map(|c| (c.source_start_ms, c.id.clone())).collect();
+        items.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let ids: Vec<String> = items.into_iter().map(|(_, id)| id).collect();
+        if !ids.is_empty() {
+            self.set_multi_sel(Sel::Caption, ids);
+            self.tab = Tab::Captions;
+        }
+    }
+
+    pub fn select_all_layouts(&mut self) {
+        let mut items: Vec<_> = self.project.scene.camera_layouts.iter().map(|l| (l.source_start_ms, l.id.clone())).collect();
+        items.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let ids: Vec<String> = items.into_iter().map(|(_, id)| id).collect();
+        if !ids.is_empty() {
+            self.set_multi_sel(Sel::Layout, ids);
+            self.tab = Tab::Camera;
+        }
+    }
+
+    pub fn select_all_annots(&mut self) {
+        let mut items: Vec<_> = self.project.scene.annotations.iter().map(|a| (a.source_start_ms, a.id.clone())).collect();
+        items.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let ids: Vec<String> = items.into_iter().map(|(_, id)| id).collect();
+        if !ids.is_empty() {
+            self.set_multi_sel(Sel::Annot, ids);
+            self.tab = Tab::Annotate;
+        }
+    }
+
+    pub fn select_all_music(&mut self) {
+        let mut items: Vec<_> = self.project.scene.music_clips.iter().map(|m| (m.offset_ms, m.id.clone())).collect();
+        items.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let ids: Vec<String> = items.into_iter().map(|(_, id)| id).collect();
+        if !ids.is_empty() {
+            self.set_multi_sel(Sel::Music, ids);
+            self.tab = Tab::Audio;
+        }
+    }
+
+    pub fn select_all_slices(&mut self) {
+        let ids: Vec<String> = self.project.scene.slices.iter().map(|s| s.id.clone()).collect();
+        if !ids.is_empty() {
+            self.set_multi_sel(Sel::Slice, ids);
+            self.tab = Tab::Pace;
+        }
+    }
+
+    pub fn select_all(&mut self) {
+        match &self.sel {
+            Sel::Slice(_) => self.select_all_slices(),
+            Sel::Zoom(_) => self.select_all_zooms(),
+            Sel::Layout(_) => self.select_all_layouts(),
+            Sel::Annot(_) => self.select_all_annots(),
+            Sel::Caption(_) => self.select_all_captions(),
+            Sel::Music(_) => self.select_all_music(),
+            Sel::None => match self.tab {
+                Tab::Captions => self.select_all_captions(),
+                Tab::Camera => self.select_all_layouts(),
+                Tab::Annotate => self.select_all_annots(),
+                Tab::Audio => self.select_all_music(),
+                Tab::Pace => self.select_all_slices(),
+                _ => self.select_all_zooms(),
+            },
         }
     }
 

@@ -184,10 +184,11 @@ fn tools(st: &mut EditorState, ui: &mut egui::Ui) {
                 let picked = ir.inner;
                 ir.response.on_disabled_hover_text("Select a clip to change speed");
                 if let Some(i) = picked {
-                    if let Sel::Slice(id) = st.sel.clone() {
+                    if matches!(&st.sel, Sel::Slice(_)) {
+                        let ids = st.selected_slice_ids();
                         let v = speeds[i];
                         st.edit(|p| {
-                            if let Some(s) = p.scene.slices.iter_mut().find(|s| s.id == id) {
+                            for s in p.scene.slices.iter_mut().filter(|s| ids.contains(&s.id)) {
                                 s.time_scale = v;
                             }
                         });
@@ -263,7 +264,7 @@ fn build_blocks(st: &mut EditorState, ctx: &egui::Context) -> (Vec<Block>, Vec<(
                 sj += 1;
             }
             let (first, last) = (&slices[si], &slices[sj - 1]);
-            let selected = matches!(&st.sel, Sel::Slice(id) if slices[si..sj].iter().any(|x| &x.id == id));
+            let selected = slices[si..sj].iter().any(|x| st.is_selected(&Sel::Slice(x.id.clone())));
             blocks.push(Block {
                 kind: Kind::Ramp,
                 id: first.id.clone(),
@@ -308,7 +309,7 @@ fn build_blocks(st: &mut EditorState, ctx: &egui::Context) -> (Vec<Block>, Vec<(
             lane: 0,
             label: if s.disabled { "Jump cut".into() } else if sped { String::new() } else if s.freeze { "Freeze".into() } else { "Clip".into() },
             sub: if sped && !s.disabled { None } else { Some(format!("{:.1}s", len / 1000.0)) },
-            sel: matches!(&st.sel, Sel::Slice(id) if id == &s.id),
+            sel: st.is_selected(&Sel::Slice(s.id.clone())),
             color: CLIP,
             text: if s.disabled { Color32::from_rgb(0xa9, 0xb4, 0xc8) } else { Color32::from_rgb(0x2d, 0x14, 0x05) },
             disabled: s.disabled,
@@ -361,7 +362,7 @@ fn build_blocks(st: &mut EditorState, ctx: &egui::Context) -> (Vec<Block>, Vec<(
                 lane: 0,
                 label: ops::layout_name(&r.layout).to_string(),
                 sub: None,
-                sel: matches!(&st.sel, Sel::Layout(id) if id == &r.id),
+                sel: st.is_selected(&Sel::Layout(r.id.clone())),
                 color: BLOCK_LAYOUT,
                 text: Color32::WHITE,
                 disabled: false,
@@ -412,7 +413,7 @@ fn build_blocks(st: &mut EditorState, ctx: &egui::Context) -> (Vec<Block>, Vec<(
             lane,
             label,
             sub: None,
-            sel: matches!(&st.sel, Sel::Annot(id) if id == &an.id),
+            sel: st.is_selected(&Sel::Annot(an.id.clone())),
             color,
             text: Color32::WHITE,
             disabled: false,
@@ -457,7 +458,7 @@ fn build_blocks(st: &mut EditorState, ctx: &egui::Context) -> (Vec<Block>, Vec<(
             lane: 0,
             label: format!("♪ {}", if c.name.is_empty() { "Music" } else { &c.name }),
             sub: None,
-            sel: matches!(&st.sel, Sel::Music(id) if id == &c.id),
+            sel: st.is_selected(&Sel::Music(c.id.clone())),
             color: BLOCK_MUSIC,
             text: Color32::WHITE,
             disabled: false,
@@ -682,83 +683,97 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
             } else if let (false, Some((bi, mode))) = (in_ruler, hit_block(pos, &preview_now, v_off)) {
                 let b = &blocks[bi];
                 let mut group = false;
+                let mut start_drag = true;
                 // selection rules
-                match b.kind {
-                    Kind::Zoom => {
-                        st.tab = Tab::Zoom;
-                        if shift || cmd {
-                            let mut ids = st.selected_zoom_ids();
-                            if let Some(p) = ids.iter().position(|x| x == &b.id) {
-                                ids.remove(p);
-                            } else {
-                                ids.push(b.id.clone());
-                            }
-                            if ids.is_empty() {
-                                st.sel = Sel::None;
-                                st.multi.clear();
-                            } else {
-                                st.sel = Sel::Zoom(ids[0].clone());
-                                st.multi = if ids.len() > 1 { ids } else { vec![] };
-                            }
-                            st.timeline.drag = None;
-                            return;
+                if shift || cmd {
+                    let (make, ordered, current): (fn(String) -> Sel, Vec<String>, Vec<String>) = match b.kind {
+                        Kind::Zoom => {
+                            st.tab = Tab::Zoom;
+                            let mut list: Vec<_> = st.project.scene.zooms.iter().map(|z| (z.source_start_ms, z.id.clone())).collect();
+                            list.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                            (Sel::Zoom, list.into_iter().map(|(_, id)| id).collect(), st.selected_zoom_ids())
                         }
-                        group = st.is_selected(&Sel::Zoom(b.id.clone())) && st.multi.len() > 1;
-                        if !group {
-                            st.select(Sel::Zoom(b.id.clone()));
+                        Kind::Caption => {
+                            st.tab = Tab::Captions;
+                            let mut list: Vec<_> = st.project.scene.subtitles.iter().map(|c| (c.source_start_ms, c.id.clone())).collect();
+                            list.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                            (Sel::Caption, list.into_iter().map(|(_, id)| id).collect(), st.selected_caption_ids())
                         }
-                    }
-                    Kind::Caption => {
-                        st.tab = Tab::Captions;
-                        let mut list = st.project.scene.subtitles.clone();
-                        list.sort_by(|a, b| a.source_start_ms.partial_cmp(&b.source_start_ms).unwrap_or(std::cmp::Ordering::Equal));
-                        if shift || cmd {
-                            let mut ids = st.selected_caption_ids();
-                            if shift && !ids.is_empty() {
-                                let i0 = list.iter().position(|c| c.id == ids[0]).unwrap_or(0);
-                                let i1 = list.iter().position(|c| c.id == b.id).unwrap_or(0);
-                                ids = list[i0.min(i1)..=i0.max(i1)].iter().map(|c| c.id.clone()).collect();
-                                if i0 > i1 {
-                                    ids.reverse();
-                                }
-                            } else if let Some(p) = ids.iter().position(|x| x == &b.id) {
-                                ids.remove(p);
-                            } else {
-                                ids.push(b.id.clone());
+                        Kind::Layout => {
+                            st.tab = Tab::Camera;
+                            let mut list: Vec<_> = st.project.scene.camera_layouts.iter().map(|l| (l.source_start_ms, l.id.clone())).collect();
+                            list.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                            (Sel::Layout, list.into_iter().map(|(_, id)| id).collect(), st.selected_layout_ids())
+                        }
+                        Kind::Annot => {
+                            st.tab = Tab::Annotate;
+                            let mut list: Vec<_> = st.project.scene.annotations.iter().map(|a| (a.source_start_ms, a.id.clone())).collect();
+                            list.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                            (Sel::Annot, list.into_iter().map(|(_, id)| id).collect(), st.selected_annot_ids())
+                        }
+                        Kind::Music => {
+                            st.tab = Tab::Audio;
+                            let mut list: Vec<_> = st.project.scene.music_clips.iter().map(|m| (m.offset_ms, m.id.clone())).collect();
+                            list.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                            (Sel::Music, list.into_iter().map(|(_, id)| id).collect(), st.selected_music_ids())
+                        }
+                        Kind::Clip | Kind::Ramp => {
+                            let list: Vec<String> = st.project.scene.slices.iter().map(|s| s.id.clone()).collect();
+                            (Sel::Slice, list, st.selected_slice_ids())
+                        }
+                    };
+                    let ids = update_range_selection(&ordered, &current, &b.id, shift);
+                    st.set_multi_sel(make, ids);
+                    st.timeline.drag = None;
+                    start_drag = false;
+                } else {
+                    match b.kind {
+                        Kind::Zoom => {
+                            st.tab = Tab::Zoom;
+                            group = st.is_selected(&Sel::Zoom(b.id.clone())) && st.multi.len() > 1;
+                            if !group {
+                                st.select(Sel::Zoom(b.id.clone()));
                             }
-                            if ids.is_empty() {
-                                st.sel = Sel::None;
-                                st.multi.clear();
-                            } else {
-                                st.sel = Sel::Caption(ids[0].clone());
-                                st.multi = if ids.len() > 1 { ids } else { vec![] };
+                        }
+                        Kind::Caption => {
+                            st.tab = Tab::Captions;
+                            group = st.is_selected(&Sel::Caption(b.id.clone())) && st.multi.len() > 1;
+                            if !group {
+                                st.select(Sel::Caption(b.id.clone()));
                             }
-                            st.timeline.drag = None;
-                            return;
                         }
-                        group = st.is_selected(&Sel::Caption(b.id.clone())) && st.multi.len() > 1;
-                        if !group {
-                            st.select(Sel::Caption(b.id.clone()));
+                        Kind::Layout => {
+                            st.tab = Tab::Camera;
+                            group = st.is_selected(&Sel::Layout(b.id.clone())) && st.multi.len() > 1;
+                            if !group {
+                                st.select(Sel::Layout(b.id.clone()));
+                            }
                         }
-                    }
-                    Kind::Layout => {
-                        st.select(Sel::Layout(b.id.clone()));
-                        st.tab = Tab::Camera;
-                    }
-                    Kind::Annot => {
-                        st.select(Sel::Annot(b.id.clone()));
-                        st.tab = Tab::Annotate;
-                    }
-                    Kind::Music => {
-                        st.select(Sel::Music(b.id.clone()));
-                        st.tab = Tab::Audio;
-                    }
-                    Kind::Clip | Kind::Ramp => {
-                        st.select(Sel::Slice(b.id.clone()));
+                        Kind::Annot => {
+                            st.tab = Tab::Annotate;
+                            group = st.is_selected(&Sel::Annot(b.id.clone())) && st.multi.len() > 1;
+                            if !group {
+                                st.select(Sel::Annot(b.id.clone()));
+                            }
+                        }
+                        Kind::Music => {
+                            st.tab = Tab::Audio;
+                            group = st.is_selected(&Sel::Music(b.id.clone())) && st.multi.len() > 1;
+                            if !group {
+                                st.select(Sel::Music(b.id.clone()));
+                            }
+                        }
+                        Kind::Clip | Kind::Ramp => {
+                            if !(st.is_selected(&Sel::Slice(b.id.clone())) && st.multi.len() > 1) {
+                                st.select(Sel::Slice(b.id.clone()));
+                            }
+                        }
                     }
                 }
-                let music = st.project.scene.music_clips.iter().find(|c| c.id == b.id).map(|c| (c.offset_ms, c.in_ms, c.dur_ms)).unwrap_or((0.0, 0.0, 0.0));
-                st.timeline.drag = Some(Drag::Block { kind: b.kind, id: b.id.clone(), mode, x0: pos.x, a0: b.a, b0: b.b, moved: false, group, music });
+                if start_drag {
+                    let music = st.project.scene.music_clips.iter().find(|c| c.id == b.id).map(|c| (c.offset_ms, c.in_ms, c.dur_ms)).unwrap_or((0.0, 0.0, 0.0));
+                    st.timeline.drag = Some(Drag::Block { kind: b.kind, id: b.id.clone(), mode, x0: pos.x, a0: b.a, b0: b.b, moved: false, group, music });
+                }
             } else {
                 // empty space or the ruler: scrub, and deselect
                 st.select(Sel::None);
@@ -782,15 +797,7 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
                         let d = (pos.x - x0) as f64 / ppm;
                         let snap_on = st.timeline.snap_enabled ^ ui.ctx().input(|i| i.modifiers.alt);
                         let snap_tol = 8.0 / ppm.max(1e-6);
-                        let skip_ids: Vec<String> = if group {
-                            if kind == Kind::Zoom {
-                                st.selected_zoom_ids()
-                            } else {
-                                st.selected_caption_ids()
-                            }
-                        } else {
-                            vec![id.clone()]
-                        };
+                        let skip_ids: Vec<String> = if group { st.selected_ids() } else { vec![id.clone()] };
                         let mut targets: Vec<f64> = Vec::with_capacity(blocks.len() * 2 + 3);
                         if snap_on {
                             targets.push(0.0);
@@ -1028,12 +1035,18 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
             }
         }
         // group followers
-        if let Some(Drag::Block { group: true, id, mode: Mode::Move, a0, .. }) = &st.timeline.drag {
+        if let Some(Drag::Block { group: true, kind, id, mode: Mode::Move, a0, .. }) = &st.timeline.drag {
             if let Some(p) = &pv {
-                if st.is_selected(&Sel::Zoom(b.id.clone())) && b.kind == Kind::Zoom || st.is_selected(&Sel::Caption(b.id.clone())) && b.kind == Kind::Caption {
-                    if &b.id != id {
-                        r = r.translate(Vec2::new(((p.a - a0) * ppm) as f32, 0.0));
-                    }
+                let same_group = match (kind, b.kind) {
+                    (Kind::Zoom, Kind::Zoom) => st.is_selected(&Sel::Zoom(b.id.clone())),
+                    (Kind::Layout, Kind::Layout) => st.is_selected(&Sel::Layout(b.id.clone())),
+                    (Kind::Annot, Kind::Annot) => st.is_selected(&Sel::Annot(b.id.clone())),
+                    (Kind::Caption, Kind::Caption) => st.is_selected(&Sel::Caption(b.id.clone())),
+                    (Kind::Music, Kind::Music) => st.is_selected(&Sel::Music(b.id.clone())),
+                    _ => false,
+                };
+                if same_group && &b.id != id {
+                    r = r.translate(Vec2::new(((p.a - a0) * ppm) as f32, 0.0));
                 }
             }
         }
@@ -1271,16 +1284,33 @@ fn commit(st: &mut EditorState, kind: Kind, id: &str, mode: Mode, group: bool, a
         Kind::Zoom | Kind::Layout | Kind::Annot | Kind::Caption => {
             if group && mode == Mode::Move {
                 let delta = ops::out_to_src(&slices, pv.a).0 - ops::out_to_src(&slices, a0).0;
-                let ids = if kind == Kind::Zoom { st.selected_zoom_ids() } else { st.selected_caption_ids() };
-                st.edit(|p| {
-                    if kind == Kind::Zoom {
+                let ids = st.selected_ids();
+                st.edit(|p| match kind {
+                    Kind::Zoom => {
                         for r in p.scene.zooms.iter_mut().filter(|r| ids.contains(&r.id)) {
                             let len = r.source_end_ms - r.source_start_ms;
                             let s = (r.source_start_ms + delta).clamp(0.0, (dur - len).max(0.0));
                             r.source_start_ms = s;
                             r.source_end_ms = s + len;
                         }
-                    } else {
+                    }
+                    Kind::Layout => {
+                        for r in p.scene.camera_layouts.iter_mut().filter(|r| ids.contains(&r.id)) {
+                            let len = r.source_end_ms - r.source_start_ms;
+                            let s = (r.source_start_ms + delta).clamp(0.0, (dur - len).max(0.0));
+                            r.source_start_ms = s;
+                            r.source_end_ms = s + len;
+                        }
+                    }
+                    Kind::Annot => {
+                        for r in p.scene.annotations.iter_mut().filter(|r| ids.contains(&r.id)) {
+                            let len = r.source_end_ms - r.source_start_ms;
+                            let s = (r.source_start_ms + delta).clamp(0.0, (dur - len).max(0.0));
+                            r.source_start_ms = s;
+                            r.source_end_ms = s + len;
+                        }
+                    }
+                    _ => {
                         for r in p.scene.subtitles.iter_mut().filter(|r| ids.contains(&r.id)) {
                             let len = r.source_end_ms - r.source_start_ms;
                             let s = (r.source_start_ms + delta).clamp(0.0, (dur - len).max(0.0));
@@ -1296,6 +1326,8 @@ fn commit(st: &mut EditorState, kind: Kind, id: &str, mode: Mode, group: bool, a
             if group {
                 st.select(match kind {
                     Kind::Zoom => Sel::Zoom(id.to_string()),
+                    Kind::Layout => Sel::Layout(id.to_string()),
+                    Kind::Annot => Sel::Annot(id.to_string()),
                     _ => Sel::Caption(id.to_string()),
                 });
             }
@@ -1358,6 +1390,19 @@ fn commit(st: &mut EditorState, kind: Kind, id: &str, mode: Mode, group: bool, a
             });
         }
         Kind::Music => {
+            if group && mode == Mode::Move {
+                let delta_out = pv.a - a0;
+                let ids = st.selected_music_ids();
+                st.edit(|p| {
+                    for c in p.scene.music_clips.iter_mut().filter(|c| ids.contains(&c.id)) {
+                        c.offset_ms = (c.offset_ms + delta_out).max(0.0).round();
+                    }
+                });
+                return;
+            }
+            if group {
+                st.select(Sel::Music(id.to_string()));
+            }
             if let Some(v) = pv.music {
                 let id = id.to_string();
                 st.edit(|p| {
@@ -1426,6 +1471,25 @@ fn commit(st: &mut EditorState, kind: Kind, id: &str, mode: Mode, group: bool, a
     }
 }
 
+fn update_range_selection(ordered_ids: &[String], current: &[String], clicked_id: &str, shift: bool) -> Vec<String> {
+    if shift && !current.is_empty() {
+        if let (Some(i0), Some(i1)) = (ordered_ids.iter().position(|x| x == &current[0]), ordered_ids.iter().position(|x| x == clicked_id)) {
+            let mut range: Vec<String> = ordered_ids[i0.min(i1)..=i0.max(i1)].to_vec();
+            if i0 > i1 {
+                range.reverse();
+            }
+            return range;
+        }
+    }
+    let mut ids = current.to_vec();
+    if let Some(p) = ids.iter().position(|x| x == clicked_id) {
+        ids.remove(p);
+    } else {
+        ids.push(clicked_id.to_string());
+    }
+    ids
+}
+
 fn find_snap_target(val: f64, targets: &[f64], tol: f64) -> Option<f64> {
     targets
         .iter()
@@ -1471,5 +1535,32 @@ mod tests {
         let (a, g) = snap_move_range(1500.0, 400.0, &targets, 15.0);
         assert_eq!(a, 1500.0);
         assert_eq!(g, None);
+    }
+
+    #[test]
+    fn range_selection_ctrl_toggle_and_shift_range() {
+        let ordered: Vec<String> = ["a", "b", "c", "d", "e"].into_iter().map(String::from).collect();
+
+        // Ctrl+click adds and removes individual items
+        let sel = update_range_selection(&ordered, &["a".into()], "c", false);
+        assert_eq!(sel, vec!["a", "c"]);
+        let sel = update_range_selection(&ordered, &sel, "a", false);
+        assert_eq!(sel, vec!["c"]);
+
+        // Shift+click forward range selects inclusive slice
+        let sel = update_range_selection(&ordered, &["b".into()], "d", true);
+        assert_eq!(sel, vec!["b", "c", "d"]);
+
+        // Shift+click backward from the same anchor ("b") reverses so anchor stays first
+        let sel = update_range_selection(&ordered, &sel, "a", true);
+        assert_eq!(sel, vec!["b", "a"]);
+
+        // Re-expanding forward from the same anchor ("b") updates the range cleanly
+        let sel = update_range_selection(&ordered, &sel, "e", true);
+        assert_eq!(sel, vec!["b", "c", "d", "e"]);
+
+        // Shift+click with no prior selection selects the clicked item
+        let sel = update_range_selection(&ordered, &[], "c", true);
+        assert_eq!(sel, vec!["c"]);
     }
 }

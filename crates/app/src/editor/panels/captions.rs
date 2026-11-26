@@ -173,6 +173,9 @@ pub fn show(st: &mut EditorState, ui: &mut Ui) {
     if cap.is_some() && multi.len() > 1 {
         kit::h3(ui, &format!("{} captions selected", multi.len()), false);
         kit::hint(ui, "Drag any selected caption to move them all together. Ctrl-click adds or removes one, Shift-click selects a range, Ctrl+A selects all.");
+        if multi.len() < list.len() && kit::btn_line(ui, "Select all captions", false).clicked() {
+            st.select_all_captions();
+        }
         if kit::btn_line(ui, &format!("Delete {} captions", multi.len()), true).clicked() {
             st.delete_selected();
         }

@@ -45,23 +45,25 @@ impl EditorState {
         self.select(Sel::None);
     }
 
-    /// Switch the selected clip (or, with nothing selected, the clip under the playhead) between
+    /// Switch the selected clip(s) (or, with nothing selected, the clip under the playhead) between
     /// playing and being a jump cut.
     pub fn toggle_jump_cut(&mut self) {
-        let id = match &self.sel {
-            Sel::Slice(id) => Some(id.clone()),
-            _ => {
-                let (_, idx) = ops::out_to_src(&self.project.scene.slices, self.playhead_ms);
-                self.project.scene.slices.get(idx).map(|s| s.id.clone())
-            }
+        let ids = if matches!(self.sel, Sel::Slice(_)) {
+            self.selected_slice_ids()
+        } else {
+            let (_, idx) = ops::out_to_src(&self.project.scene.slices, self.playhead_ms);
+            self.project.scene.slices.get(idx).map(|s| vec![s.id.clone()]).unwrap_or_default()
         };
-        let Some(id) = id else { return };
+        let Some(first_id) = ids.first().cloned() else { return };
+        let Some(target) = self.project.scene.slices.iter().find(|s| s.id == first_id).map(|s| !s.disabled) else { return };
         self.edit(|p| {
-            if let Some(s) = p.scene.slices.iter_mut().find(|s| s.id == id) {
-                s.disabled = !s.disabled;
+            for s in p.scene.slices.iter_mut().filter(|s| ids.contains(&s.id)) {
+                s.disabled = target;
             }
         });
-        self.sel = Sel::Slice(id);
+        if !matches!(self.sel, Sel::Slice(_)) {
+            self.select(Sel::Slice(first_id));
+        }
     }
 
     /// Play one hit of a click / typing sound (when the style is picked in the Audio panel).

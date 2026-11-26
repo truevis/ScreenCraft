@@ -6,16 +6,18 @@ use screencraft_core::project::{CameraConfig, Point};
 #[derive(Clone)]
 enum Target {
     Whole,
-    Layout(String),
+    Layouts(Vec<String>),
 }
 
-fn edit_cam(st: &mut EditorState, target: &Target, key: &str, f: impl FnOnce(&mut CameraConfig)) {
+fn edit_cam(st: &mut EditorState, target: &Target, key: &str, mut f: impl FnMut(&mut CameraConfig)) {
     let t = target.clone();
     st.edit_keyed(Some(key), |p| match t {
         Target::Whole => f(&mut p.config.camera),
-        Target::Layout(id) => {
-            if let Some(s) = p.scene.camera_layouts.iter_mut().find(|l| l.id == id).and_then(|l| l.settings.as_mut()) {
-                f(s)
+        Target::Layouts(ids) => {
+            let fallback = p.config.camera.clone();
+            for l in p.scene.camera_layouts.iter_mut().filter(|l| ids.contains(&l.id)) {
+                let s = l.settings.get_or_insert_with(|| fallback.clone());
+                f(s);
             }
         }
     });
@@ -89,7 +91,7 @@ fn bubble_controls(st: &mut EditorState, ui: &mut Ui, c: &CameraConfig, target: 
     if c.border {
         let mut hex = if c.border_color.is_empty() { "#ffffff".to_string() } else { c.border_color.clone() };
         if kit::color_row(ui, "Border color", &mut hex) {
-            edit_cam(st, &t, &k("bcol"), |c| c.border_color = hex);
+            edit_cam(st, &t, &k("bcol"), |c| c.border_color = hex.clone());
         }
     }
 }
@@ -132,6 +134,8 @@ pub fn show(st: &mut EditorState, ui: &mut Ui) {
     };
 
     if let Some(l) = lay {
+        let ids = st.selected_layout_ids();
+        let n = ids.len();
         // every block keeps its own settings; a block that has none yet starts from the project's
         let settings = match l.settings.clone() {
             Some(s) => s,
@@ -145,20 +149,33 @@ pub fn show(st: &mut EditorState, ui: &mut Ui) {
                 b
             }
         };
-        kit::h3_help(ui, "Camera block", false, "Drag the purple block on the Camera track to move it, its ends to trim. The camera eases between blocks.");
+        let title = if n > 1 { format!("Camera blocks · {n} selected") } else { "Camera block".to_string() };
+        let help = if n > 1 {
+            "Showing the first block’s settings. Changing a control applies it to all selected blocks. Ctrl-click to toggle, Shift-click for a range, or Ctrl+A to select all."
+        } else {
+            "Drag the purple block on the Camera track to move it, its ends to trim. Ctrl-click to toggle, Shift-click for a range, or Ctrl+A to select all."
+        };
+        kit::h3_help(ui, &title, false, help);
         let names: Vec<(String, &str)> = ops::LAYOUT_NAMES.iter().map(|(a, b)| (a.to_string(), *b)).collect();
-        let id = l.id.clone();
         let mut cur = l.layout.clone();
         if kit::segmented(ui, Some("Layout"), &names, &mut cur) {
+            let ids2 = ids.clone();
             st.edit(|p| {
-                if let Some(x) = p.scene.camera_layouts.iter_mut().find(|x| x.id == id) {
-                    x.layout = cur;
+                for x in p.scene.camera_layouts.iter_mut().filter(|x| ids2.contains(&x.id)) {
+                    x.layout = cur.clone();
                 }
             });
         }
-        kit::h3(ui, "This block's camera", false);
-        bubble_controls(st, ui, &settings, &Target::Layout(l.id.clone()), &format!("blk-{}-", l.id));
-        if kit::btn_line(ui, "Remove this block", true).clicked() {
+        kit::h3(ui, if n > 1 { "Selected blocks' camera" } else { "This block's camera" }, false);
+        bubble_controls(st, ui, &settings, &Target::Layouts(ids.clone()), &format!("blk-{}-", l.id));
+        if n < blocks.len() && kit::btn_line(ui, "Select all camera blocks", false).clicked() {
+            st.select_all_layouts();
+        }
+        if n > 1 && kit::btn_line(ui, "Clear selection", false).clicked() {
+            st.select(Sel::None);
+        }
+        let rm_label = if n > 1 { format!("Remove {n} blocks") } else { "Remove this block".to_string() };
+        if kit::btn_line(ui, &rm_label, true).clicked() {
             st.delete_selected();
         }
         return;

@@ -79,27 +79,36 @@ pub fn show(st: &mut EditorState, ui: &mut Ui) {
 
     kit::h3(ui, "Transition", false);
     let slices = st.project.scene.slices.clone();
-    let idx = if let Sel::Slice(id) = &st.sel { slices.iter().position(|s| &s.id == id) } else { None };
+    let sel_slice_ids = st.selected_slice_ids();
+    let target_ids: Vec<String> = slices.iter().skip(1).filter(|s| sel_slice_ids.contains(&s.id)).map(|s| s.id.clone()).collect();
+    let first_idx = target_ids.first().and_then(|fid| slices.iter().position(|s| &s.id == fid));
     st.panel.pace = o;
-    let Some(idx) = idx.filter(|&i| i > 0) else {
+    let Some(idx) = first_idx else {
         note(ui, "Click the + on the timeline at a cut between two clips to give it a transition.");
         return;
     };
     let s = slices[idx].clone();
-    kit::hint(ui, &format!("At the cut before “{}”.", if s.freeze { "freeze".to_string() } else { format!("clip {}", idx + 1) }));
+    let n = target_ids.len();
+    let hint_msg = if n > 1 {
+        format!("Applying to {n} selected cuts (Ctrl-click / Shift-click to select clips).")
+    } else {
+        format!("At the cut before “{}”.", if s.freeze { "freeze".to_string() } else { format!("clip {}", idx + 1) })
+    };
+    kit::hint(ui, &hint_msg);
     let opts: Vec<(String, &str)> = KINDS.iter().map(|(a, b)| (a.to_string(), *b)).collect();
     let cur = s.transition.as_ref().map(|t| t.kind.clone()).unwrap_or_else(|| "none".into());
     let id = s.id.clone();
     let dur = s.transition.as_ref().map(|t| t.duration_ms).unwrap_or(500.0);
-    seg(st, ui, Some("Style"), &opts, cur, |p, v| {
-        if let Some(x) = p.scene.slices.iter_mut().find(|x| x.id == id) {
-            x.transition = if v == "none" { None } else { Some(Transition { kind: v, duration_ms: dur }) };
+    let t_ids = target_ids.clone();
+    seg(st, ui, Some("Style"), &opts, cur, move |p, v| {
+        for x in p.scene.slices.iter_mut().filter(|x| t_ids.contains(&x.id)) {
+            x.transition = if v == "none" { None } else { Some(Transition { kind: v.clone(), duration_ms: dur }) };
         }
     });
     if let Some(t) = &s.transition {
-        let id = s.id.clone();
-        slider(st, ui, &format!("trans-len-{id}"), "Length", t.duration_ms / 1000.0, (0.2, 1.5, 0.1), |v| format!("{v:.1} s"), |p, v| {
-            if let Some(tr) = p.scene.slices.iter_mut().find(|x| x.id == id).and_then(|x| x.transition.as_mut()) {
+        let t_ids = target_ids.clone();
+        slider(st, ui, &format!("trans-len-{id}"), "Length", t.duration_ms / 1000.0, (0.2, 1.5, 0.1), |v| format!("{v:.1} s"), move |p, v| {
+            for tr in p.scene.slices.iter_mut().filter(|x| t_ids.contains(&x.id)).filter_map(|x| x.transition.as_mut()) {
                 tr.duration_ms = (v * 1000.0).round();
             }
         });
@@ -139,11 +148,23 @@ fn jump_cuts(st: &mut EditorState, ui: &mut Ui) {
     if !o.jc_status.is_empty() {
         kit::hint(ui, &o.jc_status);
     }
-    // the selected clip
+    // the selected clip(s)
     if let Sel::Slice(id) = st.sel.clone() {
+        let sel_ids = st.selected_slice_ids();
+        let n = sel_ids.len();
         if let Some(s) = st.project.scene.slices.iter().find(|s| s.id == id).cloned() {
-            let label = if s.disabled { "Restore this cut section (X)" } else { "Cut out this clip (X)" };
-            if kit::btn_line(ui, label, false).clicked() {
+            let label = if n > 1 {
+                if s.disabled {
+                    format!("Restore {n} cut sections (X)")
+                } else {
+                    format!("Cut out {n} clips (X)")
+                }
+            } else if s.disabled {
+                "Restore this cut section (X)".to_string()
+            } else {
+                "Cut out this clip (X)".to_string()
+            };
+            if kit::btn_line(ui, &label, false).clicked() {
                 st.toggle_jump_cut();
             }
         }

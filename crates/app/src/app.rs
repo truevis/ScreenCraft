@@ -44,6 +44,7 @@ pub struct App {
     /// Recordings just finished: their zooms are generated the first time they open.
     fresh: Vec<std::path::PathBuf>,
     quit: bool,
+    quit_pending: bool,
     discard_after_stop: bool,
     /// Native window handle (Windows), to keep the recording bar out of the capture.
     native_window: Option<isize>,
@@ -238,6 +239,7 @@ impl App {
             cam_preview_anchor: None,
             fresh: Vec::new(),
             quit: false,
+            quit_pending: false,
             discard_after_stop: false,
             native_window: None,
             shot: std::env::var_os("SCREENCRAFT_SHOT").map(|p| Shot {
@@ -925,9 +927,21 @@ impl App {
         let a = egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.rec.show(ui, &mut self.prefs)).inner;
         self.handle_action(&ctx, a);
 
+        if ctx.input(|i| (i.modifiers.alt && i.key_pressed(egui::Key::F4)) || i.viewport().close_requested()) {
+            if self.editors.iter().any(|e| e.ed.dirty) {
+                ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+                self.quit_pending = true;
+            } else {
+                self.quit = true;
+            }
+        } else if self.editors.is_empty() && ctx.input(|i| i.modifiers.ctrl && !i.modifiers.alt && i.key_pressed(egui::Key::F4)) {
+            self.quit = true;
+        }
+
         // editors, one window each
         let mut open_requests: Vec<std::path::PathBuf> = Vec::new();
         let mut compress_requests: Vec<std::path::PathBuf> = Vec::new();
+        let mut quit_requested = false;
         let mut i = 0;
         while i < self.editors.len() {
             let (id, title) = (self.editors[i].id, self.editors[i].title.clone());
@@ -938,7 +952,16 @@ impl App {
                 let ed = &mut self.editors[i].ed;
                 ctx.show_viewport_immediate(id, builder, |ui, _class| {
                     ed.ui(ui, &mut self.prefs);
-                    if ui.ctx().input(|i| i.viewport().close_requested()) {
+                    let (alt_f4, ctrl_f4, close_req) = ui.ctx().input(|i| {
+                        let alt = i.modifiers.alt && i.key_pressed(egui::Key::F4);
+                        let ctrl = i.modifiers.ctrl && !i.modifiers.alt && i.key_pressed(egui::Key::F4);
+                        let req = i.viewport().close_requested();
+                        (alt || (req && i.modifiers.alt), ctrl, req)
+                    });
+                    if alt_f4 {
+                        ui.ctx().send_viewport_cmd(ViewportCommand::CancelClose);
+                        quit_requested = true;
+                    } else if ctrl_f4 || close_req {
                         if ed.dirty {
                             ui.ctx().send_viewport_cmd(ViewportCommand::CancelClose);
                             ed.close_prompt = Some(crate::editor::CloseIntent::Window);
@@ -953,6 +976,10 @@ impl App {
                         compress_requests.push(req);
                     }
                 });
+            }
+            if quit_requested {
+                self.quit_pending = true;
+                quit_requested = false;
             }
             if let Some(req) = self.editors[i].ed.footage_request.take() {
                 use crate::editor::FootageRequest;
@@ -974,7 +1001,11 @@ impl App {
                 use crate::editor::{Answer, CloseIntent};
                 let intent = self.editors[i].ed.close_prompt.take();
                 match ans {
-                    Answer::Cancel => {}
+                    Answer::Cancel => {
+                        if matches!(intent, Some(CloseIntent::Quit)) {
+                            self.quit_pending = false;
+                        }
+                    }
                     Answer::Save | Answer::Discard => {
                         if ans == Answer::Save {
                             self.editors[i].ed.save_now();
@@ -982,7 +1013,7 @@ impl App {
                             self.editors[i].ed.dirty = false;
                         }
                         match intent {
-                            Some(CloseIntent::Window) => close = true,
+                            Some(CloseIntent::Window | CloseIntent::Quit) => close = true,
                             Some(CloseIntent::Open(p)) => {
                                 self.editors[i].ed.close_after_open = true;
                                 open_requests.push(p);
@@ -1083,6 +1114,18 @@ impl App {
         };
         if let Some((rect, style)) = outline {
             crate::area::draw_frame(&ctx, rect, style, self.rec.displays());
+        }
+        if self.quit_pending {
+            if self.editors.iter().any(|e| e.ed.dirty) {
+                if !self.editors.iter().any(|e| e.ed.close_prompt.is_some()) {
+                    if let Some(e) = self.editors.iter_mut().find(|e| e.ed.dirty) {
+                        e.ed.close_prompt = Some(crate::editor::CloseIntent::Quit);
+                    }
+                }
+            } else {
+                self.quit_pending = false;
+                self.quit = true;
+            }
         }
         if self.quit {
             ctx.send_viewport_cmd(ViewportCommand::Close);
