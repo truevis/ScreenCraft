@@ -20,8 +20,6 @@
 </p>
 
 <p align="center">
-  <a href="https://screencraft.mdnlabs.dev/download"><b>Download for macOS</b></a> ·
-  <a href="https://screencraft.mdnlabs.dev/download"><b>Download for Windows</b></a> ·
   <a href="https://screencraft.mdnlabs.dev">Website</a> ·
   <a href="CHANGELOG.md">Changelog</a>
 </p>
@@ -86,14 +84,7 @@ high-DPI screens. Original project: [MarshallNickolauson/ScreenCraft](https://gi
 
 ### Install the Windows edition
 
-**Option 1: download the installer from GitHub Actions** (needs a GitHub account)
-1. Open [Actions → Build Windows installer](https://github.com/truevis/ScreenCraft/actions/workflows/build-windows.yml).
-2. Click the latest successful run and download the installer artifact at the bottom.
-3. Unzip it and run `screencraft_<version>.exe`. It installs per user to
-   `%LOCALAPPDATA%\Programs\ScreenCraft`; no admin rights needed. The installer is unsigned, so
-   SmartScreen may warn: **More info → Run anyway**.
-
-**Option 2: build it yourself**
+Build it yourself:
 1. Install [Rust](https://rustup.rs) (MSVC toolchain) and the Visual Studio Build Tools with
    *Desktop development with C++*, then:
    ```powershell
@@ -189,15 +180,9 @@ software codecs are deterministic. ScreenCraft bundles **no H.264 codec**; see [
 
 ### macOS
 
-**One-line install (no macOS security prompt):**
-
-```bash
-curl -fsSL https://screencraft.mdnlabs.dev/install.sh | bash
-```
-
-Or download `screencraft_<version>.dmg` from the [download page](https://screencraft.mdnlabs.dev/download),
-open it and drag **ScreenCraft** onto **Applications**. The app is ad-hoc signed (not notarised), so
-macOS blocks it the first time: **System Settings → Privacy & Security → Open Anyway**, or
+Build from source (see [Build from source (macOS)](#build-from-source-macos) below). The app is ad-hoc
+signed when bundled locally (not notarised), so macOS may block it the first time:
+**System Settings → Privacy & Security → Open Anyway**, or
 `xattr -dr com.apple.quarantine /Applications/ScreenCraft.app`.
 
 Requires macOS 15 (Sequoia) or newer; developed on Apple silicon.
@@ -214,13 +199,12 @@ permissions survive rebuilds.
 
 ### Windows
 
-Download `screencraft_<version>.exe` from the [download page](https://screencraft.mdnlabs.dev/download).
-It installs per user into `%LOCALAPPDATA%\Programs\ScreenCraft`. Capture uses DXGI Desktop
-Duplication, system audio is a WASAPI loopback. The installer is unsigned, so SmartScreen may warn.
-On laptops with two graphics chips, the NVIDIA overlay may announce itself when ScreenCraft starts;
-it isn't used and can be switched off in the NVIDIA app.
+For this fork's Windows-focused build, see [Install the Windows edition](#install-the-windows-edition)
+above. Capture uses DXGI Desktop Duplication and WASAPI loopback for system audio. The installer is
+unsigned, so SmartScreen may warn. On laptops with two graphics chips, the NVIDIA overlay may
+announce itself when ScreenCraft starts; it isn't used and can be switched off in the NVIDIA app.
 
-Build it yourself with Rust (MSVC toolchain, *Desktop development with C++*), CMake, LLVM and NSIS;
+Build with Rust (MSVC toolchain, *Desktop development with C++*), CMake, LLVM and NSIS;
 the installer is named after the version (`screencraft_0_4_1.exe`):
 
 ```powershell
