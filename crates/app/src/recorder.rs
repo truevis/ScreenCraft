@@ -52,6 +52,7 @@ impl Mode {
 
 enum Cmd {
     Start(RecordOptions),
+    SetPaused(bool),
     Stop,
 }
 
@@ -89,6 +90,11 @@ impl Controller {
                                 let _ = evt_tx.send(Evt::StartFailed(e));
                             }
                         },
+                        Cmd::SetPaused(p) => {
+                            if let Some(rec) = &current {
+                                rec.set_paused(p);
+                            }
+                        }
                         Cmd::Stop => {
                             if let Some(rec) = current.take() {
                                 let r = rec.stop();
@@ -109,6 +115,10 @@ impl Controller {
 
     pub fn start(&self, o: RecordOptions) {
         let _ = self.tx.send(Cmd::Start(o));
+    }
+
+    pub fn set_paused(&self, paused: bool) {
+        let _ = self.tx.send(Cmd::SetPaused(paused));
     }
 
     pub fn stop(&self) {
@@ -180,6 +190,7 @@ pub struct Menu {
 pub enum Action {
     None,
     Record,
+    TogglePause,
     Stop,
     Cancel,
     AskDiscard,
@@ -189,6 +200,7 @@ pub enum Action {
     OpenProject(PathBuf),
     PickArea,
     HoverWindow(Option<WindowInfo>),
+    ShowCameraPreview,
 }
 
 pub struct Recorder {
@@ -208,6 +220,9 @@ pub struct Recorder {
     pub countdown_at: Option<Instant>,
     pub stats: Option<Arc<LiveStats>>,
     pub started_at: Option<Instant>,
+    pub paused: bool,
+    pub paused_at: Option<Instant>,
+    pub paused_total: Duration,
     pub encoder: String,
     pub size: (u32, u32),
     pub error: Option<(String, Instant)>,
@@ -234,7 +249,7 @@ impl Recorder {
             // an area or window pick does not survive a restart, so always start on the display
             _ => Mode::Display,
         };
-        Self {
+        let mut rec = Self {
             mode,
             sources: None,
             sources_at: None,
@@ -249,6 +264,9 @@ impl Recorder {
             countdown_at: None,
             stats: None,
             started_at: None,
+            paused: false,
+            paused_at: None,
+            paused_total: Duration::ZERO,
             encoder: String::new(),
             size: (0, 0),
             error: None,
@@ -265,7 +283,20 @@ impl Recorder {
             last_menu_close: None,
             live: crate::live::Live::new(ctx),
             idle_w: None,
+        };
+        if (mode == Mode::Camera || prefs.camera) && std::env::var_os("SCREENCRAFT_NO_LIVE").is_none() {
+            rec.probe_cameras();
         }
+        rec
+    }
+
+    pub fn probe_cameras(&mut self) {
+        self.cameras_loaded = true;
+        let (tx, ctx) = (self.probe_tx.clone(), self.ctx.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(Probe::Cameras(screencraft_capture::camera::list()));
+            ctx.request_repaint();
+        });
     }
 
     pub fn show_error(&mut self, msg: impl Into<String>) {
@@ -273,7 +304,7 @@ impl Recorder {
     }
 
     /// Poll the slow platform queries (they run off the UI thread; they can block on prompts).
-    pub fn refresh(&mut self, prefs: &Prefs) {
+    pub fn refresh(&mut self, prefs: &mut Prefs) {
         let stale = |t: &Option<Instant>, s: u64| t.map(|t| t.elapsed().as_secs() >= s).unwrap_or(true);
         while let Ok(p) = self.probe_rx.try_recv() {
             match p {
@@ -291,6 +322,13 @@ impl Recorder {
                     self.mics_loaded = true;
                 }
                 Probe::Cameras(c) => {
+                    if prefs.camera && prefs.camera_id.is_none() {
+                        if let Some((id, name)) = c.first() {
+                            prefs.camera_id = Some(id.clone());
+                            prefs.camera_label = name.clone();
+                            prefs.save();
+                        }
+                    }
                     self.cameras = c;
                     self.cameras_loaded = true;
                     // a phone plugged in while the menu is open shows up right away
@@ -337,7 +375,7 @@ impl Recorder {
             (Mode::Camera, false) => screencraft_capture::camera::CamPreset::TalkingHead,
             _ => screencraft_capture::camera::CamPreset::Bubble,
         };
-        self.live.sync(prefs, self.phase, self.parked, preset);
+        self.live.sync(prefs, self.phase, self.parked, preset, self.mode != Mode::Camera);
         if let Some(e) = self.live.take_error() {
             self.show_error(e);
         }
@@ -389,7 +427,11 @@ impl Recorder {
     }
 
     pub fn elapsed_ms(&self) -> f64 {
-        self.started_at.map(|t| t.elapsed().as_secs_f64() * 1000.0).unwrap_or(0.0)
+        let Some(started) = self.started_at else {
+            return 0.0;
+        };
+        let paused_cur = self.paused_at.map(|t| t.elapsed()).unwrap_or(Duration::ZERO);
+        started.elapsed().saturating_sub(self.paused_total + paused_cur).as_secs_f64() * 1000.0
     }
 
     pub fn bar_width(&self) -> f32 {
@@ -402,7 +444,7 @@ impl Recorder {
         match self.phase {
             Phase::Idle | Phase::Starting => Vec2::new(self.bar_width().min(screen_w - 24.0), BAR_H + menu_h),
             Phase::Countdown => Vec2::new(240.0, 60.0),
-            Phase::Recording | Phase::Finishing => Vec2::new(if camera { 380.0 } else { 340.0 }, 60.0),
+            Phase::Recording | Phase::Finishing => Vec2::new(if camera { 430.0 } else { 390.0 }, 60.0),
             Phase::Confirm => Vec2::new(420.0, 60.0),
         }
     }
@@ -496,8 +538,23 @@ impl Recorder {
     }
 
     fn quality_items(&self, prefs: &Prefs) -> Vec<MenuItem> {
+        let cam_crop = self.live.camera_frame_size().map(|(w, h)| {
+            let (_, _, cw, ch) = screencraft_capture::camera_capture::crop_for(w, h, prefs.vertical);
+            (cw, ch)
+        });
         let d = self.displays().iter().find(|d| Some(d.id) == self.display);
         let dims = |long: u32| -> String {
+            if self.mode == Mode::Camera {
+                if let Some((cw, ch)) = cam_crop {
+                    let (w, h) = (cw as f64, ch as f64);
+                    if long > 0 && w.max(h) > long as f64 {
+                        let k = long as f64 / w.max(h);
+                        return format!("{} × {}", screencraft_capture::even(w * k), screencraft_capture::even(h * k));
+                    }
+                    return format!("{cw} × {ch}");
+                }
+                return String::new();
+            }
             match (d, long) {
                 (Some(d), l) if l > 0 => {
                     let k = l as f64 / d.width.max(d.height);
@@ -510,6 +567,11 @@ impl Recorder {
         for (val, label, _) in RESOLUTIONS {
             let sub = if val > 0 {
                 dims(val)
+            } else if self.mode == Mode::Camera {
+                match cam_crop {
+                    Some((cw, ch)) => format!("{cw} × {ch}"),
+                    None => "Native camera resolution".into(),
+                }
             } else if let Some(d) = d {
                 let (pw, ph) = if d.physical_width > 0 && d.physical_height > 0 {
                     (d.physical_width, d.physical_height)
@@ -569,11 +631,17 @@ impl Recorder {
             MenuAction::PickDisplay(id) => self.display = Some(id),
             MenuAction::Resolution(v) => prefs.max_long_side = v,
             MenuAction::Fps(f) => prefs.fps = f,
-            MenuAction::CameraOff => prefs.camera = false,
+            MenuAction::CameraOff => {
+                prefs.camera = false;
+                if self.mode == Mode::Camera {
+                    self.mode = Mode::Display;
+                }
+            }
             MenuAction::Camera(id, name) => {
                 prefs.camera = true;
                 prefs.camera_id = Some(id);
                 prefs.camera_label = name;
+                self.live.retry_camera();
             }
             MenuAction::MicOff => prefs.microphone = false,
             MenuAction::Mic(id, name) => {
@@ -719,7 +787,13 @@ impl Recorder {
             if i < last {
                 ui.painter().line_segment([Pos2::new(r.max.x - 0.5, r.min.y), Pos2::new(r.max.x - 0.5, r.max.y)], Stroke::new(1.0, LINE_2));
             }
-            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+            let tip = match m {
+                Mode::Camera => "Record from webcam only (no screen)",
+                Mode::Display => "Record a display",
+                Mode::Window => "Record a single window",
+                Mode::Area => "Drag out a screen region to record",
+            };
+            if resp.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                 clicked_mode = Some((*m, r));
             }
             mx += widths[i];
@@ -879,7 +953,9 @@ impl Recorder {
                     prefs.camera = true;
                     prefs.save();
                 }
-                Action::None
+                self.live.retry_camera();
+                self.probe_cameras();
+                Action::ShowCameraPreview
             }
         }
     }
@@ -888,12 +964,7 @@ impl Recorder {
         match kind {
             MenuKind::Camera => {
                 // look again every time the menu opens, so a phone just plugged in is found
-                self.cameras_loaded = true;
-                let (tx, ctx) = (self.probe_tx.clone(), self.ctx.clone());
-                std::thread::spawn(move || {
-                    let _ = tx.send(Probe::Cameras(screencraft_capture::camera::list()));
-                    ctx.request_repaint();
-                });
+                self.probe_cameras();
                 let items = self.camera_items(prefs);
                 self.toggle_menu(kind, items, left);
             }
@@ -1020,10 +1091,15 @@ impl Recorder {
             x += 34.0 + 14.0;
         }
         if !finishing {
-            // pulse
-            let t = ui.input(|i| i.time);
-            let a = 0.35 + 0.65 * (0.5 + 0.5 * (t * std::f64::consts::TAU / 1.2).cos()) as f32;
-            ui.painter().rect_filled(Rect::from_center_size(Pos2::new(x + 5.5, cy), Vec2::splat(11.0)), CornerRadius::same(3), alpha(DANGER, a));
+            // pulse (steady amber when paused)
+            let dot_color = if self.paused {
+                Color32::from_rgb(0xf6, 0xc4, 0x53)
+            } else {
+                let t = ui.input(|i| i.time);
+                let a = 0.35 + 0.65 * (0.5 + 0.5 * (t * std::f64::consts::TAU / 1.2).cos()) as f32;
+                alpha(DANGER, a)
+            };
+            ui.painter().rect_filled(Rect::from_center_size(Pos2::new(x + 5.5, cy), Vec2::splat(11.0)), CornerRadius::same(3), dot_color);
             x += 11.0 + 14.0;
         }
         let secs = (self.elapsed_ms() / 1000.0) as u64;
@@ -1034,7 +1110,10 @@ impl Recorder {
         x += w + 14.0;
         if !finishing {
             if let Some(s) = &self.stats {
-                for (enabled, lvl, tip) in [(prefs.microphone, s.mic_peak(), "Microphone"), (prefs.system_audio, s.system_peak(), "System audio")] {
+                for (enabled, lvl, tip) in [
+                    (prefs.microphone, s.mic_peak(), "Microphone"),
+                    (prefs.system_audio && self.mode != Mode::Camera, s.system_peak(), "System audio"),
+                ] {
                     if !enabled {
                         continue;
                     }
@@ -1045,7 +1124,7 @@ impl Recorder {
                     x += 34.0 + 2.0 + 8.0;
                 }
             }
-            // trash + stop on the right
+            // trash + pause/resume + stop on the right
             let stop_w = 18.0 * 2.0 + kit::text_width(ui, "Stop", 13.0);
             let stop = Rect::from_min_size(Pos2::new(bar.max.x - 12.0 - stop_w, cy - 20.0), Vec2::new(stop_w, 40.0));
             let resp = ui.interact(stop, ui.id().with("stop"), Sense::click());
@@ -1054,7 +1133,25 @@ impl Recorder {
             if resp.on_hover_text("Stop recording (Ctrl+Shift+R)").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                 action = Action::Stop;
             }
-            let trash = Rect::from_min_size(Pos2::new(stop.min.x - 10.0 - 40.0, cy - 20.0), Vec2::splat(40.0));
+            let pause = Rect::from_min_size(Pos2::new(stop.min.x - 10.0 - 40.0, cy - 20.0), Vec2::splat(40.0));
+            {
+                let resp = ui.interact(pause, ui.id().with("pause"), Sense::click());
+                let hov = resp.hovered();
+                if self.paused {
+                    ui.painter().rect_filled(pause, CornerRadius::same(9), if hov { ACCENT_2 } else { ACCENT });
+                    ui.painter().rect_stroke(pause, CornerRadius::same(9), Stroke::new(1.0, Color32::from_white_alpha(46)), StrokeKind::Inside);
+                    icons::paint(ui, "play", Rect::from_center_size(pause.center(), Vec2::splat(18.0)), Color32::WHITE);
+                } else {
+                    ui.painter().rect_filled(pause, CornerRadius::same(9), if hov { Color32::from_white_alpha(18) } else { Color32::TRANSPARENT });
+                    ui.painter().rect_stroke(pause, CornerRadius::same(9), Stroke::new(1.0, LINE_2), StrokeKind::Inside);
+                    icons::paint(ui, "pause", Rect::from_center_size(pause.center(), Vec2::splat(18.0)), if hov { Color32::WHITE } else { Color32::from_rgb(0xb9, 0xc4, 0xd9) });
+                }
+                let tip = if self.paused { "Resume recording" } else { "Pause recording" };
+                if resp.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    action = Action::TogglePause;
+                }
+            }
+            let trash = Rect::from_min_size(Pos2::new(pause.min.x - 10.0 - 40.0, cy - 20.0), Vec2::splat(40.0));
             let resp = ui.interact(trash, ui.id().with("trash"), Sense::click());
             let hov = resp.hovered();
             ui.painter().rect_filled(trash, CornerRadius::same(9), if hov { alpha(DANGER, 0.16) } else { Color32::TRANSPARENT });

@@ -32,8 +32,10 @@ pub const BLOCK_NOTE: Color32 = rgb(0xc9792a);
 pub const BLOCK_NOTE_SHAPE: Color32 = rgb(0xb8483c);
 pub const BLOCK_NOTE_BLUR: Color32 = rgb(0x5d6b82);
 pub const BLOCK_NOTE_SPOT: Color32 = rgb(0x8a6d12);
+pub const BLOCK_NOTE_IMAGE: Color32 = rgb(0x3682a8);
 pub const BLOCK_CAPTION: Color32 = rgb(0x1f8f87);
 pub const BLOCK_MUSIC: Color32 = rgb(0x2f9a72);
+pub const SNAP_GUIDE: Color32 = rgb(0xffd166);
 
 pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;

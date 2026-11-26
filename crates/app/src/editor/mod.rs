@@ -97,6 +97,9 @@ struct PreviewGeo {
     view_w: f32,
     view_h: f32,
     bounds: Vec<screencraft_render::overlay::Bound>,
+    cam_rect: Option<[f32; 4]>,
+    cam_layout_id: u8,
+    cam_layout_idx: i32,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -114,6 +117,18 @@ struct AnnotDrag {
     p0: Pos2,
     start: (f64, f64, f64, f64, f64, f64),
     content: bool,
+}
+
+#[derive(Clone)]
+struct CamDrag {
+    layout_idx: i32,
+    resize: bool,
+    p0: Pos2,
+    start_pos: screencraft_core::project::Point,
+    start_size: f64,
+    box_size: (f32, f32),
+    pad: f32,
+    snap_pt: Option<(f64, f64)>,
 }
 
 /// Preview frame rate of the render track (editing); exports use their own.
@@ -156,6 +171,7 @@ struct CachedPreview {
     out: (u32, u32),
     screen: [f32; 4],
     bounds: Vec<screencraft_render::overlay::Bound>,
+    cam_rect: Option<[f32; 4]>,
 }
 
 pub struct EditorState {
@@ -212,6 +228,7 @@ pub struct EditorState {
     /// Last scene's annotation boxes and geometry (for the drag handles on the preview).
     preview_geo: Option<PreviewGeo>,
     annot_drag: Option<AnnotDrag>,
+    cam_drag: Option<CamDrag>,
     crop_drag: Option<CropDrag>,
     pub preview_override_src: Option<f64>,
     pub preview_res: u32,
@@ -331,6 +348,7 @@ impl EditorState {
             preview_shown: None,
             preview_geo: None,
             annot_drag: None,
+            cam_drag: None,
             crop_drag: None,
             preview_override_src: None,
             preview_res: 720,
@@ -760,6 +778,35 @@ impl EditorState {
         self.tab = Tab::Annotate;
     }
 
+    pub fn add_image_annotation(&mut self) {
+        match crate::imgdata::pick_and_save_image_with_size(&self.package.dir, "annot", 1920) {
+            Ok(Some((file, iw, ih))) => {
+                let (start, end) = ops::region_at(&self.project, self.playhead_ms, 3500.0);
+                let id = self.new_id("annot");
+                let (ow, oh) = output_size(&self.project, 1080);
+                let img_aspect = iw as f64 / ih.max(1) as f64;
+                let out_aspect = ow as f64 / oh.max(1) as f64;
+                let mut w = 0.28_f64;
+                let mut h = w * out_aspect / img_aspect.max(0.05);
+                if h > 0.55 {
+                    h = 0.55;
+                    w = (h * img_aspect / out_aspect).clamp(0.06, 0.85);
+                }
+                let mut a = ops::new_annotation("image", id.clone(), start, end);
+                a.image = file;
+                a.x = (0.5 - w / 2.0).clamp(0.02, 0.95);
+                a.y = (0.5 - h / 2.0).clamp(0.02, 0.95);
+                a.w = w;
+                a.h = h;
+                self.edit(|p| p.scene.annotations.push(a));
+                self.select(Sel::Annot(id));
+                self.tab = Tab::Annotate;
+            }
+            Ok(None) => {}
+            Err(e) => self.error = Some(e),
+        }
+    }
+
     pub fn add_caption(&mut self) {
         let (start, end) = ops::region_at(&self.project, self.playhead_ms, 2500.0);
         let id = self.new_id("cap");
@@ -770,6 +817,7 @@ impl EditorState {
                 source_end_ms: end,
                 text: "Your caption".into(),
                 word_starts: vec![],
+                word_ends: vec![],
             })
         });
         self.select(Sel::Caption(id));
@@ -819,10 +867,25 @@ impl EditorState {
                         if let Some(i) = p.scene.subtitles.iter().position(|x| x.id == id) {
                             let it = p.scene.subtitles[i].clone();
                             if src > it.source_start_ms + 50.0 && src < it.source_end_ms - 50.0 {
-                                let mut r = it;
+                                let spans = screencraft_core::transcript::word_spans(&it);
+                                let (left_words, right_words): (Vec<_>, Vec<_>) = spans.into_iter().partition(|(_, ws, we)| (*ws + *we) * 0.5 < src);
+                                let mut r = it.clone();
                                 r.id = new.clone();
                                 r.source_start_ms = src;
                                 p.scene.subtitles[i].source_end_ms = src;
+                                if !left_words.is_empty() && !right_words.is_empty() {
+                                    p.scene.subtitles[i].text = left_words.iter().map(|w| w.0.as_str()).collect::<Vec<_>>().join(" ");
+                                    p.scene.subtitles[i].word_starts = left_words.iter().map(|w| w.1).collect();
+                                    p.scene.subtitles[i].word_ends = left_words.iter().map(|w| w.2).collect();
+                                    r.text = right_words.iter().map(|w| w.0.as_str()).collect::<Vec<_>>().join(" ");
+                                    r.word_starts = right_words.iter().map(|w| w.1).collect();
+                                    r.word_ends = right_words.iter().map(|w| w.2).collect();
+                                } else {
+                                    p.scene.subtitles[i].word_starts.clear();
+                                    p.scene.subtitles[i].word_ends.clear();
+                                    r.word_starts.clear();
+                                    r.word_ends.clear();
+                                }
                                 p.scene.subtitles.insert(i + 1, r);
                                 right_id = Some(new.clone());
                             }
@@ -1078,7 +1141,23 @@ impl EditorState {
             }
         }
         if pressed(egui::Key::Delete) || pressed(egui::Key::Backspace) {
-            self.delete_selected();
+            if self.tab == Tab::Captions && self.sel == Sel::None && self.panel.caps.view_transcript && !self.panel.caps.selected_words.is_empty() {
+                let words = screencraft_core::transcript::extract_words(&self.project.scene.subtitles, &self.project.scene.slices);
+                let ranges: Vec<[f64; 2]> = self
+                    .panel
+                    .caps
+                    .selected_words
+                    .iter()
+                    .filter_map(|&i| words.get(i).filter(|w| !w.cut).map(|w| [w.start_ms, w.end_ms]))
+                    .collect();
+                if !ranges.is_empty() {
+                    self.cut_source_ranges(&ranges);
+                }
+                self.panel.caps.selected_words.clear();
+                self.panel.caps.anchor_word = None;
+            } else {
+                self.delete_selected();
+            }
         }
         let step = if shift { 1000.0 } else { 1000.0 / 30.0 };
         if pressed(egui::Key::ArrowLeft) {
@@ -1189,9 +1268,9 @@ impl EditorState {
         let shown = Rect::from_center_size(rect.center(), size);
         let render_key = (self.project_rev, i, self.upload_gen, self.preview_res, self.preview_override_src.map(|v| v.round() as i64));
         let hit = self.tex.is_some() && self.cached_preview.as_ref().is_some_and(|c| c.key == render_key && c.out == (w, h));
-        let (scene_screen, bounds) = if hit {
+        let (scene_screen, bounds, cam_rect) = if hit {
             let c = self.cached_preview.as_ref().unwrap();
-            (c.screen, c.bounds.clone())
+            (c.screen, c.bounds.clone(), c.cam_rect)
         } else {
             let scene = build_scene_in(&self.project, &self.track, i, (w, h), None, Some(&self.package.dir));
             self.compositor.render(&scene);
@@ -1200,8 +1279,9 @@ impl EditorState {
                 out: (w, h),
                 screen: scene.screen,
                 bounds: scene.layers.bounds,
+                cam_rect: scene.cam.map(|c| c.rect),
             };
-            let res = (cached.screen, cached.bounds.clone());
+            let res = (cached.screen, cached.bounds.clone(), cached.cam_rect);
             self.cached_preview = Some(cached);
             res
         };
@@ -1215,6 +1295,9 @@ impl EditorState {
             view_w: self.project.config.crop.width as f32 / self.track.zoom[i] as f32,
             view_h: self.project.config.crop.height as f32 / self.track.zoom[i] as f32,
             bounds,
+            cam_rect,
+            cam_layout_id: self.track.layout_cur.get(i).copied().unwrap_or(0),
+            cam_layout_idx: self.track.layout_cur_idx.get(i).copied().unwrap_or(-1),
         });
         let id = if hit {
             self.tex.unwrap().0
@@ -1461,7 +1544,12 @@ impl EditorState {
             }
             let col = if on || resp.hovered() { Color32::WHITE } else { Color32::from_rgb(0x7f, 0x8b, 0xa1) };
             icons::paint(ui, icon, Rect::from_center_size(r.center(), Vec2::splat(19.0)), col);
-            if resp.on_hover_text(*title).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+            let generating_caps = self.panel.caps.busy && *tab == Tab::Captions;
+            if generating_caps {
+                ui.painter().circle_filled(Pos2::new(r.max.x - 7.0, r.min.y + 7.0), 3.0, ACCENT_2);
+            }
+            let tip = if generating_caps { "Captions (transcribing…)" } else { *title };
+            if resp.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                 self.tab = *tab;
             }
         }
@@ -1633,6 +1721,7 @@ impl EditorState {
             self.crop_handles(ui, content);
         }
         self.annotation_handles(ui);
+        self.camera_handles(ui);
     }
 
     /// On-canvas edge and corner crop handles when the Crop tab is active.
@@ -1813,6 +1902,7 @@ impl EditorState {
                 // canvas px -> annotation units
                 let (kx, ky) = if d.content { (geo.view_w as f64 / geo.sr[2] as f64, geo.view_h as f64 / geo.sr[3] as f64) } else { (1.0 / geo.out.0 as f64, 1.0 / geo.out.1 as f64) };
                 let (dx, dy) = (dxc as f64 * kx, dyc as f64 * ky);
+                let lock_aspect = ui.ctx().input(|i| i.modifiers.shift);
                 let (id2, mode, s) = (d.id.clone(), d.mode, d.start);
                 self.edit_keyed(Some(&format!("annot-drag-{id2}")), |p| {
                     if let Some(x) = p.scene.annotations.iter_mut().find(|x| x.id == id2) {
@@ -1827,7 +1917,11 @@ impl EditorState {
                             }
                             DragMode::Resize => {
                                 x.w = (s.2 + dx).max(0.01);
-                                x.h = (s.3 + dy).max(0.01);
+                                if x.kind == "image" && lock_aspect && s.2 > 1e-4 {
+                                    x.h = (x.w * (s.3 / s.2)).max(0.01);
+                                } else {
+                                    x.h = (s.3 + dy).max(0.01);
+                                }
                             }
                             DragMode::ArrowStart => {
                                 x.x = s.0 + dx;
@@ -1844,6 +1938,155 @@ impl EditorState {
         }
         if resp.drag_stopped() {
             self.annot_drag = None;
+        }
+    }
+
+    /// Direct drag-to-position & resize handles for the webcam PiP bubble on the preview canvas.
+    fn camera_handles(&mut self, ui: &mut egui::Ui) {
+        if self.project.media.camera.is_none() || self.tab == Tab::Crop || self.annot_drag.is_some() {
+            return;
+        }
+        let (Some(shown), Some(geo)) = (self.preview_shown, self.preview_geo.clone()) else { return };
+        let Some(cr) = geo.cam_rect else { return };
+        if !matches!(geo.cam_layout_id, 0 | 2) {
+            return;
+        }
+        let cc = screencraft_render::layout::cam_settings(&self.project, geo.cam_layout_idx);
+        if cc.hide {
+            return;
+        }
+        let k = shown.width() / geo.out.0 as f32;
+        let to_scr = |x: f32, y: f32| Pos2::new(shown.min.x + x * k, shown.min.y + y * k);
+        let r_scr = Rect::from_min_size(to_scr(cr[0], cr[1]), Vec2::new(cr[2] * k, cr[3] * k));
+        let u = geo.out.1 as f32 / 1080.0;
+        let hover_pos = ui.ctx().input(|i| i.pointer.hover_pos());
+        let hovered = hover_pos.is_some_and(|p| r_scr.expand(8.0 * u * k).contains(p));
+        let dragging = self.cam_drag.is_some();
+
+        if self.tab == Tab::Camera || hovered || dragging {
+            let col = if dragging { SNAP_GUIDE } else { ACCENT_2 };
+            let corners = [r_scr.left_top(), r_scr.right_top(), r_scr.right_bottom(), r_scr.left_bottom(), r_scr.left_top()];
+            for w in corners.windows(2) {
+                ui.painter().extend(egui::Shape::dashed_line(&[w[0], w[1]], Stroke::new(1.8 * u * k, col), 5.0 * u * k, 4.0 * u * k));
+            }
+            ui.painter().rect_filled(Rect::from_center_size(r_scr.right_bottom(), Vec2::splat(10.0 * u * k)), 0.0, col);
+        }
+
+        if let Some(d) = &self.cam_drag {
+            if let Some((sx, sy)) = d.snap_pt {
+                let cx = r_scr.center().x;
+                let cy = r_scr.center().y;
+                if sx >= 0.0 {
+                    let gx = match sx {
+                        v if v < 0.25 => r_scr.min.x,
+                        v if v > 0.75 => r_scr.max.x,
+                        _ => shown.center().x,
+                    };
+                    let _ = cx;
+                    ui.painter().line_segment([Pos2::new(gx, shown.min.y), Pos2::new(gx, shown.max.y)], Stroke::new(1.2, alpha(SNAP_GUIDE, 0.85)));
+                }
+                if sy >= 0.0 {
+                    let gy = match sy {
+                        v if v < 0.25 => r_scr.min.y,
+                        v if v > 0.75 => r_scr.max.y,
+                        _ => shown.center().y,
+                    };
+                    let _ = cy;
+                    ui.painter().line_segment([Pos2::new(shown.min.x, gy), Pos2::new(shown.max.x, gy)], Stroke::new(1.2, alpha(SNAP_GUIDE, 0.85)));
+                }
+            }
+        }
+
+        let hit_rect = r_scr.expand(12.0 * u * k);
+        let resp = ui.interact(hit_rect, ui.id().with("cam-pip-drag"), Sense::click_and_drag());
+        let near_corner = |p: Pos2| (p - r_scr.right_bottom()).length() <= 14.0 * u * k;
+        if let Some(pos) = resp.hover_pos() {
+            if self.cam_drag.as_ref().is_some_and(|d| d.resize) || (!dragging && near_corner(pos)) {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeNwSe);
+            } else if dragging || r_scr.contains(pos) {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+            }
+        }
+        if resp.drag_started() {
+            if let Some(pos) = resp.interact_pointer_pos() {
+                let resize = near_corner(pos);
+                let mul = if geo.cam_layout_id == 2 { 1.7 } else { 1.0 };
+                let bb = screencraft_render::layout::bubble_box(&self.project, &cc, geo.out.0 as f32, geo.out.1 as f32, 1.0, mul);
+                self.cam_drag = Some(CamDrag {
+                    layout_idx: geo.cam_layout_idx,
+                    resize,
+                    p0: pos,
+                    start_pos: cc.position,
+                    start_size: cc.size_ratio,
+                    box_size: (bb.w, bb.h),
+                    pad: bb.pad,
+                    snap_pt: None,
+                });
+            }
+        }
+        if resp.dragged() {
+            if let (Some(mut d), Some(pos)) = (self.cam_drag.clone(), resp.interact_pointer_pos()) {
+                let (dxc, dyc) = ((pos.x - d.p0.x) / k, (pos.y - d.p0.y) / k);
+                let alt = ui.ctx().input(|i| i.modifiers.alt);
+                let mut new_pos = d.start_pos;
+                let mut new_size = d.start_size;
+                if d.resize {
+                    let m = (geo.out.0.min(geo.out.1) as f64).max(1.0);
+                    let delta = (dxc as f64 + dyc as f64) * 0.5 / m;
+                    new_size = (d.start_size + delta).clamp(0.1, 0.6);
+                    d.snap_pt = None;
+                } else {
+                    let travel_x = (geo.out.0 as f32 - d.box_size.0 - 2.0 * d.pad).max(1.0) as f64;
+                    let travel_y = (geo.out.1 as f32 - d.box_size.1 - 2.0 * d.pad).max(1.0) as f64;
+                    let mut nx = (d.start_pos.x + dxc as f64 / travel_x).clamp(0.0, 1.0);
+                    let mut ny = (d.start_pos.y + dyc as f64 / travel_y).clamp(0.0, 1.0);
+                    let mut sx = -1.0;
+                    let mut sy = -1.0;
+                    if !alt {
+                        for cand in [0.0_f64, 0.5, 1.0] {
+                            if (nx - cand).abs() * travel_x <= 14.0 {
+                                nx = cand;
+                                sx = cand;
+                                break;
+                            }
+                        }
+                        for cand in [0.0_f64, 0.5, 1.0] {
+                            if (ny - cand).abs() * travel_y <= 14.0 {
+                                ny = cand;
+                                sy = cand;
+                                break;
+                            }
+                        }
+                    }
+                    d.snap_pt = if sx >= 0.0 || sy >= 0.0 { Some((sx, sy)) } else { None };
+                    new_pos = screencraft_core::project::Point { x: nx, y: ny };
+                }
+                self.cam_drag = Some(d.clone());
+                let lidx = d.layout_idx;
+                let resize = d.resize;
+                self.edit_keyed(Some("cam-pip-canvas"), |p| {
+                    let cfg = if lidx >= 0 {
+                        if let Some(reg) = p.scene.camera_layouts.get_mut(lidx as usize) {
+                            if reg.settings.is_none() {
+                                reg.settings = Some(p.config.camera.clone());
+                            }
+                            reg.settings.as_mut().unwrap()
+                        } else {
+                            &mut p.config.camera
+                        }
+                    } else {
+                        &mut p.config.camera
+                    };
+                    if resize {
+                        cfg.size_ratio = new_size;
+                    } else {
+                        cfg.position = new_pos;
+                    }
+                });
+            }
+        }
+        if resp.drag_stopped() {
+            self.cam_drag = None;
         }
     }
 }

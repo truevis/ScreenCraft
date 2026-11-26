@@ -51,6 +51,9 @@ pub struct App {
     append_target: Option<(std::path::PathBuf, String)>,
     /// Footage being added to a project (runs on its own thread).
     append_job: Option<AppendJob>,
+    /// Floating camera viewfinder dismissed by user until re-selecting Camera mode.
+    cam_preview_hidden: bool,
+    cam_preview_anchor: Option<Pos2>,
 }
 
 /// Joining a recording or video onto the end of a project, off the UI thread.
@@ -190,7 +193,11 @@ impl App {
     }
 
     fn build(ctx: &egui::Context, render_state: eframe::egui_wgpu::RenderState, hotkeys: bool) -> Self {
-        let prefs = Prefs::load();
+        let mut prefs = Prefs::load();
+        if std::env::var("SCREENCRAFT_AUTORECORD_MODE").as_deref() == Ok("camera") {
+            prefs.mode = "camera".into();
+            prefs.camera = true;
+        }
         let (mgr, id) = match if hotkeys { GlobalHotKeyManager::new() } else { Err(global_hotkey::Error::AlreadyRegistered(HotKey::new(None, Code::KeyA))) } {
             Ok(m) => {
                 let id = if prefs.global_hotkey {
@@ -227,6 +234,8 @@ impl App {
             pending_open: Vec::new(),
             append_target: None,
             append_job: None,
+            cam_preview_hidden: false,
+            cam_preview_anchor: None,
             fresh: Vec::new(),
             quit: false,
             discard_after_stop: false,
@@ -288,9 +297,18 @@ impl App {
         if self.rec.phase != Phase::Idle {
             return;
         }
-        if self.rec.mode == Mode::Camera && !self.prefs.camera {
-            self.rec.show_error("Turn the camera on to record a talking-head video.");
-            return;
+        if self.rec.mode == Mode::Camera {
+            if !self.prefs.camera {
+                self.rec.show_error("Turn the camera on to record a talking-head video.");
+                return;
+            }
+            if self.rec.live.loading(crate::live::Input::Camera, &self.prefs) {
+                return;
+            }
+            if let Some(err) = self.rec.live.camera_error() {
+                self.rec.show_error(err.to_string());
+                return;
+            }
         }
         if self.rec.mode == Mode::Window && self.rec.window.is_none() {
             self.rec.show_error("Choose a window to record (click Window).");
@@ -432,6 +450,9 @@ impl App {
                 Evt::Started { stats, width, height, encoder } => {
                     self.rec.stats = Some(stats);
                     self.rec.started_at = Some(Instant::now());
+                    self.rec.paused = false;
+                    self.rec.paused_at = None;
+                    self.rec.paused_total = Duration::ZERO;
                     self.rec.size = (width, height);
                     self.rec.encoder = encoder;
                     self.rec.phase = Phase::Recording;
@@ -444,6 +465,9 @@ impl App {
                     self.rec.phase = Phase::Idle;
                     self.rec.stats = None;
                     self.rec.started_at = None;
+                    self.rec.paused = false;
+                    self.rec.paused_at = None;
+                    self.rec.paused_total = Duration::ZERO;
                     let discard = std::mem::take(&mut self.discard_after_stop);
                     if self.autorecord.is_some() {
                         match &r {
@@ -493,6 +517,21 @@ impl App {
         match a {
             Action::None => {}
             Action::Record => self.begin_recording(ctx),
+            Action::TogglePause => {
+                if self.rec.phase == Phase::Recording {
+                    self.rec.paused = !self.rec.paused;
+                    if self.rec.paused {
+                        self.rec.paused_at = Some(Instant::now());
+                        self.rec.controller.set_paused(true);
+                    } else {
+                        if let Some(t) = self.rec.paused_at.take() {
+                            self.rec.paused_total += t.elapsed();
+                        }
+                        self.rec.controller.set_paused(false);
+                    }
+                    ctx.request_repaint();
+                }
+            }
             Action::Stop => self.finish_recording(ctx, false),
             Action::Cancel => self.finish_recording(ctx, false),
             Action::AskDiscard => self.rec.phase = Phase::Confirm,
@@ -507,6 +546,10 @@ impl App {
             Action::OpenProject(dir) => self.pending_open.push(dir),
             Action::PickArea => self.pick_area(ctx),
             Action::HoverWindow(w) => self.hover_window = w,
+            Action::ShowCameraPreview => {
+                self.cam_preview_hidden = false;
+                self.cam_preview_anchor = None;
+            }
         }
     }
 
@@ -642,6 +685,158 @@ impl App {
         ctx.send_viewport_cmd(ViewportCommand::OuterPosition(pos));
         self.applied = Some(key);
     }
+
+    /// Floating opaque live viewfinder shown in Camera-only mode (kept out of capture).
+    fn draw_camera_preview(&mut self, ctx: &egui::Context) {
+        let active = self.editors.is_empty()
+            && self.rec.mode == Mode::Camera
+            && self.prefs.camera
+            && !self.cam_preview_hidden
+            && matches!(self.rec.phase, Phase::Idle | Phase::Countdown | Phase::Starting | Phase::Recording | Phase::Confirm);
+        if !active {
+            self.cam_preview_anchor = None;
+            return;
+        }
+        let tex = self.rec.live.preview_texture(self.prefs.vertical);
+        let aspect = match tex {
+            Some((_, cw, ch)) => (cw as f32 / ch.max(1) as f32).clamp(0.4, 2.5),
+            None => if self.prefs.vertical { 9.0 / 16.0 } else { 16.0 / 9.0 },
+        };
+        let mut size = if self.prefs.vertical || aspect < 1.0 {
+            Vec2::new((360.0 * aspect).clamp(180.0, 420.0), 360.0)
+        } else {
+            Vec2::new(384.0, (384.0 / aspect).clamp(180.0, 320.0))
+        };
+        let disp = self.home_display(ctx);
+        let max_room = Vec2::new((disp.width() - 48.0).max(200.0), (disp.height() - BAR_H - 96.0).max(160.0));
+        if size.x > max_room.x || size.y > max_room.y {
+            let k = (max_room.x / size.x).min(max_room.y / size.y);
+            size *= k;
+        }
+        let default_pos = self.cam_preview_anchor.unwrap_or_else(|| {
+            let pos = match ctx.input(|i| i.viewport().outer_rect) {
+                Some(bar_o) => Pos2::new(
+                    (bar_o.center().x - size.x / 2.0).clamp(disp.min.x + 8.0, (disp.max.x - size.x - 8.0).max(disp.min.x + 8.0)),
+                    (bar_o.min.y - size.y - 14.0).max(disp.min.y + 12.0),
+                ),
+                None => Pos2::new(disp.center().x - size.x / 2.0, (disp.center().y - size.y / 2.0 - 60.0).max(disp.min.y + 12.0)),
+            };
+            self.cam_preview_anchor = Some(pos);
+            pos
+        });
+        let builder = ViewportBuilder::default()
+            .with_title("sc-camera-preview")
+            .with_position(default_pos)
+            .with_inner_size(size)
+            .with_decorations(false)
+            .with_resizable(false)
+            .with_has_shadow(true)
+            .with_taskbar(false)
+            .with_always_on_top();
+        let vertical = self.prefs.vertical;
+        let phase = self.rec.phase;
+        let paused = self.rec.paused;
+        let elapsed_ms = self.rec.elapsed_ms();
+        let countdown_left = self.rec.countdown_at.map(|t| (3.0 - t.elapsed().as_secs_f32()).ceil().max(1.0) as u32);
+        let cam_loading = self.rec.live.loading(crate::live::Input::Camera, &self.prefs);
+        let cam_err = self.rec.live.camera_error().map(str::to_string);
+        let mut hide_req = false;
+        let mut retry_req = false;
+        ctx.show_viewport_immediate(ViewportId::from_hash_of("sc-camera-preview"), builder, |ui, _| {
+            egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
+                let full = ui.max_rect();
+                ui.painter().rect_filled(full, egui::CornerRadius::same(10), crate::theme::BG);
+
+                let close_r = egui::Rect::from_min_size(Pos2::new(full.max.x - 32.0, full.min.y + 8.0), Vec2::splat(24.0));
+                let drag_resp = ui.interact(full, ui.id().with("cam-prev-drag"), egui::Sense::drag());
+                let close_resp = ui.interact(close_r, ui.id().with("cam-prev-close"), egui::Sense::click());
+                if drag_resp.drag_started() && !close_resp.hovered() {
+                    ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);
+                }
+
+                if let Some((tid, cw, ch)) = tex {
+                    let uv = egui::Rect::from_min_max(Pos2::new(1.0, 0.0), Pos2::new(0.0, 1.0));
+                    ui.painter().image(tid, full, uv, Color32::WHITE);
+                    let secs = (elapsed_ms / 1000.0) as u64;
+                    let rec_on = matches!(phase, Phase::Recording | Phase::Confirm);
+                    let badge = match phase {
+                        Phase::Recording | Phase::Confirm if paused => format!("PAUSED  {}:{:02}", secs / 60, secs % 60),
+                        Phase::Recording | Phase::Confirm => format!("REC  {}:{:02}", secs / 60, secs % 60),
+                        _ if vertical => format!("Webcam · 9:16 · {cw}×{ch}"),
+                        _ => format!("Webcam · {cw}×{ch}"),
+                    };
+                    let dot_w = if rec_on { 14.0 } else { 0.0 };
+                    let tw = crate::kit::text_width(ui, &badge, 11.5);
+                    let br = egui::Rect::from_min_size(Pos2::new(full.min.x + 8.0, full.min.y + 8.0), Vec2::new(tw + 16.0 + dot_w, 22.0));
+                    let p = ui.painter();
+                    p.rect_filled(br, egui::CornerRadius::same(6), Color32::from_rgba_unmultiplied(11, 16, 26, 200));
+                    if rec_on {
+                        let dot_col = if paused { Color32::from_rgb(0xf6, 0xc4, 0x53) } else { crate::theme::DANGER };
+                        p.circle_filled(Pos2::new(br.min.x + 11.0, br.center().y), 4.0, dot_col);
+                    }
+                    p.text(Pos2::new(br.min.x + 8.0 + dot_w, br.center().y), egui::Align2::LEFT_CENTER, badge, crate::kit::font(11.5), Color32::WHITE);
+                } else if cam_loading {
+                    let t = ui.input(|i| i.time) as f32;
+                    let c = full.center() - Vec2::new(0.0, 14.0);
+                    {
+                        let p = ui.painter();
+                        for k in 0..12 {
+                            let a = k as f32 / 12.0 * std::f32::consts::TAU + t * 8.0;
+                            let alpha_ = ((k as f32 / 12.0) * 200.0) as u8;
+                            p.circle_filled(c + Vec2::new(a.cos(), a.sin()) * 11.0, 1.8, Color32::from_rgba_unmultiplied(106, 174, 232, alpha_));
+                        }
+                        p.text(full.center() + Vec2::new(0.0, 14.0), egui::Align2::CENTER_CENTER, "Starting camera…", crate::kit::font(13.0), crate::theme::LABEL);
+                    }
+                    ui.ctx().request_repaint_after(Duration::from_millis(40));
+                } else if let Some(err) = &cam_err {
+                    let inner = full.shrink2(Vec2::new(22.0, 38.0));
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space((inner.height() - 68.0).max(0.0) / 2.0);
+                            ui.add(egui::Label::new(egui::RichText::new(err).size(12.5).color(crate::theme::TEXT)).wrap());
+                            ui.add_space(10.0);
+                            if ui.button("Retry camera").clicked() {
+                                retry_req = true;
+                            }
+                        });
+                    });
+                } else {
+                    ui.painter().text(full.center(), egui::Align2::CENTER_CENTER, "Waiting for camera…", crate::kit::font(13.0), crate::theme::MUTED);
+                }
+
+                let chov = close_resp.hovered();
+                {
+                    let p = ui.painter();
+                    if phase == Phase::Countdown {
+                        if let Some(n) = countdown_left {
+                            p.circle_filled(full.center(), 32.0, Color32::from_rgba_unmultiplied(11, 16, 26, 200));
+                            p.text(full.center(), egui::Align2::CENTER_CENTER, n.to_string(), egui::FontId::proportional(34.0), Color32::WHITE);
+                        }
+                    }
+                    p.rect_filled(close_r, egui::CornerRadius::same(6), if chov { crate::theme::alpha(crate::theme::DANGER, 0.85) } else { Color32::from_rgba_unmultiplied(11, 16, 26, 195) });
+                    let cc = close_r.center();
+                    for (a, b) in [((-4.0, -4.0), (4.0, 4.0)), ((4.0, -4.0), (-4.0, 4.0))] {
+                        p.line_segment([cc + Vec2::new(a.0, a.1), cc + Vec2::new(b.0, b.1)], egui::Stroke::new(1.8, Color32::WHITE));
+                    }
+                    p.rect_stroke(full, egui::CornerRadius::same(10), egui::Stroke::new(1.0, crate::theme::LINE_2), egui::StrokeKind::Inside);
+                }
+                if close_resp.on_hover_text("Hide camera preview (click Camera in the bar to reopen)").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    hide_req = true;
+                } else if drag_resp.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+                }
+            });
+        });
+        screencraft_capture::exclude_window_titled("sc-camera-preview");
+        if hide_req {
+            self.cam_preview_hidden = true;
+            self.cam_preview_anchor = None;
+        }
+        if retry_req {
+            self.rec.live.retry_camera();
+            self.rec.probe_cameras();
+        }
+    }
 }
 
 impl eframe::App for App {
@@ -685,7 +880,7 @@ impl App {
         self.dev_screenshot(&ctx);
         self.sync_hotkey();
         self.rec.parked = !self.editors.is_empty();
-        self.rec.refresh(&self.prefs);
+        self.rec.refresh(&mut self.prefs);
         if let Some(secs) = self.autorecord {
             match self.rec.phase {
                 Phase::Idle if !self.autorecord_started => {
@@ -831,6 +1026,7 @@ impl App {
             }
         }
         self.draw_append(&ctx);
+        self.draw_camera_preview(&ctx);
         open_requests.extend(std::mem::take(&mut self.pending_open));
         for dir in open_requests {
             // opening another project replaces the ones on screen, asking about unsaved edits first

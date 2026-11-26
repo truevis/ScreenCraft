@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Recording session, project packages and media sources for ScreenCraft"
 
+[features]
+default = []
+whisper = ["dep:whisper-rs", "dep:ureq", "dep:dirs"]
+
 [dependencies]
 screencraft-core = { path = "../core" }
 screencraft-encode = { path = "../encode" }
@@ -16,3 +20,9 @@ gif = "0.13"
 color_quant = "1.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+whisper-rs = { version = "0.16", optional = true }
+ureq = { version = "2", optional = true }
+dirs = { version = "7", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+whisper-rs = { version = "0.16", features = ["metal"], optional = true }

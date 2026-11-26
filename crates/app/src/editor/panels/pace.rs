@@ -27,8 +27,7 @@ const KINDS: [(&str, &str); 7] = [("none", "None"), ("dissolve", "Dissolve"), ("
 
 pub fn show(st: &mut EditorState, ui: &mut Ui) {
     jump_cuts(st, ui);
-    kit::h3(ui, "Speed up idle parts", false);
-    note(ui, "Finds stretches with no clicks, typing or cursor movement (and no talking) and fast-forwards them.");
+    kit::h3_help(ui, "Speed up idle parts", false, "Finds stretches with no clicks, typing or cursor movement (and no talking) and fast-forwards them.");
     let mut o = std::mem::take(&mut st.panel.pace);
     kit::slider(ui, "Idle for at least", &mut o.min_idle, 1.0, 10.0, 0.5, |v| format!("{v:.1} s"));
     let speeds = [(2.0f64.to_bits(), "2×"), (4.0f64.to_bits(), "4×"), (8.0f64.to_bits(), "8×")];
@@ -65,8 +64,7 @@ pub fn show(st: &mut EditorState, ui: &mut Ui) {
         kit::hint(ui, &o.status);
     }
 
-    kit::h3(ui, "Speed ramps", false);
-    note(ui, "Turns each abrupt change of speed between clips into a smooth ease.");
+    kit::h3_help(ui, "Speed ramps", false, "Turns each abrupt change of speed between clips into a smooth ease.");
     kit::slider(ui, "Ease length", &mut o.ramp, 0.2, 1.5, 0.1, |v| format!("{v:.1} s"));
     if kit::btn_line(ui, "Ease all speed changes", false).clicked() {
         let n = st.ease_all(o.ramp * 1000.0);
@@ -111,8 +109,7 @@ pub fn show(st: &mut EditorState, ui: &mut Ui) {
 
 /// The jump-cut section: silences found from the speech, greyed out on the timeline.
 fn jump_cuts(st: &mut EditorState, ui: &mut Ui) {
-    kit::h3(ui, "Jump cuts", true);
-    note(ui, "Finds the pauses in your speech and switches those stretches off. They stay on the timeline, greyed out, but are skipped when it plays and left out of the export. Drag their edges to adjust them, or select one and press X to turn it back on.");
+    kit::h3_help(ui, "Jump cuts (remove silence)", true, "Automatically finds silent pauses in your speech and cuts them out of playback and export. Removed pauses stay greyed out on the timeline so you can drag their edges or press X on any cut to restore it.");
     let has_audio = st.project.media.mic_track.is_some() || st.project.media.mic.is_some() || st.project.media.system_track.is_some();
     let mut o = std::mem::take(&mut st.panel.pace);
     if !has_audio {
@@ -121,11 +118,11 @@ fn jump_cuts(st: &mut EditorState, ui: &mut Ui) {
         kit::slider(ui, "Silence at least", &mut o.jc_silence, 0.2, 2.0, 0.05, |v| format!("{v:.2} s"));
         kit::slider(ui, "Keep around speech", &mut o.jc_padding, 0.0, 0.4, 0.01, |v| format!("{:.0} ms", v * 1000.0));
         kit::slider(ui, "Sensitivity", &mut o.jc_sens, 0.0, 1.0, 0.05, |v| format!("{:.0}%", v * 100.0));
-        if kit::btn_line(ui, "Find jump cuts", false).clicked() {
+        if kit::btn_line(ui, "Remove silences automatically", false).clicked() {
             let settings = screencraft_core::jumpcut::JumpCutSettings { min_silence_ms: o.jc_silence * 1000.0, padding_ms: o.jc_padding * 1000.0, sensitivity: o.jc_sens };
             o.jc_status = match st.auto_jump_cuts(settings) {
-                Ok((0, _)) => "No pauses that long. Try a shorter silence or a higher sensitivity.".into(),
-                Ok((n, ms)) => format!("{n} jump cut{} found, {:.1} s removed from the final video.", if n == 1 { "" } else { "s" }, ms / 1000.0),
+                Ok((0, _)) => "No silent pauses that long. Try a shorter minimum silence or a higher sensitivity.".into(),
+                Ok((n, ms)) => format!("Removed {n} silent pause{} ({:.1} s cut from the final video).", if n == 1 { "" } else { "s" }, ms / 1000.0),
                 Err(e) => e,
             };
         }
@@ -134,9 +131,9 @@ fn jump_cuts(st: &mut EditorState, ui: &mut Ui) {
     if cuts > 0 {
         let ms = screencraft_core::jumpcut::cut_total_ms(&st.project.scene.slices);
         kit::hint(ui, &format!("{cuts} jump cut{} · {:.1} s skipped · final length {:.1} s", if cuts == 1 { "" } else { "s" }, ms / 1000.0, st.play_duration_ms() / 1000.0));
-        if kit::btn_line(ui, "Turn all jump cuts off", false).clicked() {
+        if kit::btn_line(ui, "Restore all removed silences", false).clicked() {
             st.clear_jump_cuts();
-            o.jc_status = "All jump cuts are back on the timeline as normal clips.".into();
+            o.jc_status = "All removed silences have been restored.".into();
         }
     }
     if !o.jc_status.is_empty() {
@@ -145,7 +142,7 @@ fn jump_cuts(st: &mut EditorState, ui: &mut Ui) {
     // the selected clip
     if let Sel::Slice(id) = st.sel.clone() {
         if let Some(s) = st.project.scene.slices.iter().find(|s| s.id == id).cloned() {
-            let label = if s.disabled { "Turn this jump cut back on (X)" } else { "Make this clip a jump cut (X)" };
+            let label = if s.disabled { "Restore this cut section (X)" } else { "Cut out this clip (X)" };
             if kit::btn_line(ui, label, false).clicked() {
                 st.toggle_jump_cut();
             }

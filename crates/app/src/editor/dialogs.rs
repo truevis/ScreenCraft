@@ -4,7 +4,7 @@ use super::{open_url, EditorState};
 use crate::kit;
 use crate::theme::*;
 use eframe::egui::{self, Align2, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
-use screencraft_core::project::{CameraConfig, CursorConfig, Project, Styles};
+use screencraft_core::presets::{apply_preset_value, builtin_presets};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
@@ -67,61 +67,6 @@ fn save_user_presets(all: &[(String, Value)]) {
         let tmp = p.with_extension("json.tmp");
         if let Err(e) = std::fs::write(&tmp, serde_json::to_vec_pretty(&m).unwrap_or_default()).and_then(|_| std::fs::rename(&tmp, &p)) {
             crate::applog::line(&format!("could not save presets: {e}"));
-        }
-    }
-}
-
-fn builtin() -> Vec<(&'static str, Value)> {
-    const PAD: f64 = 0.02;
-    vec![
-        ("Clean", json!({ "styles": { "paddingRatio": PAD, "cornerRadius": 14, "background": { "kind": "wallpaper", "wallpaper": "sunset" } } })),
-        ("Minimal", json!({ "styles": { "paddingRatio": PAD, "cornerRadius": 10, "background": { "kind": "color", "color": "#0b0c12" }, "shadow": { "intensity": 0.15 } } })),
-        (
-            "Vivid",
-            json!({ "styles": { "paddingRatio": PAD, "cornerRadius": 24, "background": { "kind": "gradient", "gradientFrom": "#ff6ad5", "gradientTo": "#3b82c4", "gradientAngle": 135 } }, "cursor": { "clickEffect": "ripple", "size": 34 } }),
-        ),
-        ("Sunset", json!({ "styles": { "paddingRatio": PAD, "cornerRadius": 18, "background": { "kind": "wallpaper", "wallpaper": "sunset" } } })),
-    ]
-}
-
-fn deep_merge(t: &mut Value, s: &Value) {
-    if let (Some(to), Some(so)) = (t.as_object_mut(), s.as_object()) {
-        for (k, v) in so {
-            if v.is_object() {
-                deep_merge(to.entry(k.clone()).or_insert_with(|| json!({})), v);
-            } else {
-                to.insert(k.clone(), v.clone());
-            }
-        }
-    }
-}
-
-fn apply_preset(p: &mut Project, pr: &Value) {
-    // go through JSON so partial presets merge field by field, exactly like the web editor
-    for key in ["styles", "cursor", "camera"] {
-        let Some(src) = pr.get(key) else { continue };
-        match key {
-            "styles" => {
-                let mut v = serde_json::to_value(&p.config.styles).unwrap_or(Value::Null);
-                deep_merge(&mut v, src);
-                if let Ok(x) = serde_json::from_value::<Styles>(v) {
-                    p.config.styles = x;
-                }
-            }
-            "cursor" => {
-                let mut v = serde_json::to_value(&p.config.cursor).unwrap_or(Value::Null);
-                deep_merge(&mut v, src);
-                if let Ok(x) = serde_json::from_value::<CursorConfig>(v) {
-                    p.config.cursor = x;
-                }
-            }
-            _ => {
-                let mut v = serde_json::to_value(&p.config.camera).unwrap_or(Value::Null);
-                deep_merge(&mut v, src);
-                if let Ok(x) = serde_json::from_value::<CameraConfig>(v) {
-                    p.config.camera = x;
-                }
-            }
         }
     }
 }
@@ -294,7 +239,7 @@ fn presets_menu(st: &mut EditorState, ctx: &egui::Context) {
     let mut bufs = std::mem::take(&mut st.dialogs.rename_buf);
     let outside = popover(ctx, "presets-menu", anchor, false, 210.0, 260.0, |m| {
         if !manage {
-            for (n, v) in builtin() {
+            for (n, v) in builtin_presets() {
                 if m.item(n) {
                     apply = Some(v);
                     close = true;
@@ -366,7 +311,7 @@ fn presets_menu(st: &mut EditorState, ctx: &egui::Context) {
     st.dialogs.rename_buf = bufs;
     st.dialogs.focus_name = None;
     if let Some(v) = apply {
-        st.edit(|p| apply_preset(p, &v));
+        st.edit(|p| apply_preset_value(p, &v));
     }
     if save_new {
         let mut n = user.len() + 1;
@@ -420,7 +365,8 @@ fn raw_menu(st: &mut EditorState, ctx: &egui::Context) {
     let mut action: Option<u8> = None;
     let outside = popover(ctx, "raw-menu", anchor, false, 210.0, 260.0, |m| {
         m.header("Raw recording files");
-        if m.item("Save raw screen video as…") {
+        let primary_label = if media.camera_only { "Save raw camera video as…" } else { "Save raw screen video as…" };
+        if m.item(primary_label) {
             action = Some(0);
         }
         if media.camera.is_some() && m.item("Save raw camera video as…") {
@@ -439,7 +385,11 @@ fn raw_menu(st: &mut EditorState, ctx: &egui::Context) {
         st.dialogs.raw = false;
         match a {
             0 | 1 => {
-                let (rel, label) = if a == 0 { (media.screen.clone(), "(raw screen)") } else { (media.camera.clone().unwrap_or_default(), "(raw camera)") };
+                let (rel, label) = if a == 0 {
+                    (media.screen.clone(), if media.camera_only { "(raw camera)" } else { "(raw screen)" })
+                } else {
+                    (media.camera.clone().unwrap_or_default(), "(raw camera)")
+                };
                 let ext = std::path::Path::new(&rel).extension().and_then(|e| e.to_str()).unwrap_or("mp4").to_string();
                 let base = name.replace(['/', '\\', ':'], "-");
                 if let Some(dst) = rfd::FileDialog::new().set_file_name(format!("{base} {label}.{ext}")).add_filter(ext.to_uppercase(), &[&ext]).save_file() {

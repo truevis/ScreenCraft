@@ -30,7 +30,7 @@ fn even(v: f64) -> u32 {
 }
 
 /// The part of a `w`x`h` picture to keep: all of it, or a centred 9:16 column of a landscape one.
-fn crop_for(w: u32, h: u32, vertical: bool) -> (u32, u32, u32, u32) {
+pub fn crop_for(w: u32, h: u32, vertical: bool) -> (u32, u32, u32, u32) {
     if vertical && (w as u64) * 16 > (h as u64) * 9 {
         let cw = (even(h as f64 * 9.0 / 16.0)).min(w);
         ((w - cw) / 2, 0, cw, h)
@@ -39,11 +39,26 @@ fn crop_for(w: u32, h: u32, vertical: bool) -> (u32, u32, u32, u32) {
     }
 }
 
-/// Crop `crop` out of packed RGB and scale it to `(ow, oh)` as BGRA (bilinear).
+/// Crop `crop` out of packed RGB and scale it to `(ow, oh)` as BGRA (direct copy on 1:1, bilinear when scaled).
 fn rgb_to_bgra(f: &CamFrame, crop: (u32, u32, u32, u32), (ow, oh): (u32, u32)) -> Vec<u8> {
     let (cx, cy, cw, ch) = crop;
     let stride = f.width as usize * 3;
     let mut out = vec![255u8; ow as usize * oh as usize * 4];
+    if (cw, ch) == (ow, oh) {
+        for y in 0..oh as usize {
+            let row_in = (cy as usize + y) * stride + cx as usize * 3;
+            let row_out = y * ow as usize * 4;
+            for x in 0..ow as usize {
+                let i = row_in + x * 3;
+                let o = row_out + x * 4;
+                // BGRA: channel 0 of the output is blue
+                out[o] = f.rgb[i + 2];
+                out[o + 1] = f.rgb[i + 1];
+                out[o + 2] = f.rgb[i];
+            }
+        }
+        return out;
+    }
     let (sx, sy) = (cw as f32 / ow as f32, ch as f32 / oh as f32);
     for y in 0..oh as usize {
         let fy = ((y as f32 + 0.5) * sy - 0.5).clamp(0.0, ch as f32 - 1.0);
@@ -158,5 +173,20 @@ mod tests {
         let f = CamFrame { width: 2, height: 2, rgb: vec![10, 20, 30, 10, 20, 30, 10, 20, 30, 10, 20, 30], at: std::time::Instant::now() };
         let px = rgb_to_bgra(&f, (0, 0, 2, 2), (2, 2));
         assert_eq!(&px[..4], &[30, 20, 10, 255]);
+    }
+
+    #[test]
+    fn rgb_crop_and_scale_to_bgra() {
+        // 4x2 frame: left half red, right half blue; cropping right half at 1:1 and scaled preserves blue
+        let mut rgb = Vec::with_capacity(4 * 2 * 3);
+        for _y in 0..2 {
+            rgb.extend_from_slice(&[200, 10, 20, 200, 10, 20, 10, 40, 220, 10, 40, 220]);
+        }
+        let f = CamFrame { width: 4, height: 2, rgb, at: std::time::Instant::now() };
+        let direct = rgb_to_bgra(&f, (2, 0, 2, 2), (2, 2));
+        assert_eq!(&direct[..4], &[220, 40, 10, 255]);
+        let scaled = rgb_to_bgra(&f, (2, 0, 2, 2), (4, 4));
+        assert_eq!(scaled.len(), 4 * 4 * 4);
+        assert_eq!(&scaled[..4], &[220, 40, 10, 255]);
     }
 }

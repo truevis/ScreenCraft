@@ -42,7 +42,7 @@ pub fn show(st: &mut EditorState, ui: &mut Ui) {
         slider(st, ui, "a-keyvol", "Typing volume", a.key_volume, (0.0, 1.0, 0.01), pct, |p, v| p.config.audio.key_volume = v);
     }
 
-    kit::h3(ui, "Music", false);
+    kit::h3_help(ui, "Music", false, "Drag a green block to place it, drag its ends to trim, and press S to split at the playhead.");
     let clips = st.project.scene.music_clips.clone();
     if !clips.is_empty() && (m.mic.is_some() || m.has_microphone) {
         toggle(st, ui, "Lower music when I speak", Some("Ducks the music under your microphone."), a.duck_music, |p, v| p.config.audio.duck_music = v);
@@ -72,7 +72,6 @@ pub fn show(st: &mut EditorState, ui: &mut Ui) {
     }
     if !clips.is_empty() {
         slider(st, ui, "a-music", "Music volume", a.music_volume, (0.0, 1.0, 0.01), pct, |p, v| p.config.audio.music_volume = v);
-        kit::hint(ui, "Drag a green block to place it, drag its ends to trim, and press S to split at the playhead.");
     }
     if kit::btn_line(ui, "Add music…", false).clicked() {
         st.add_music();

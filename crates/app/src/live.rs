@@ -46,8 +46,12 @@ pub struct Live {
     camera_preset: CamPreset,
     camera_starting: Arc<AtomicBool>,
     camera_slot: Arc<Mutex<Option<Result<Started<CameraStream>, String>>>>,
+    camera_failed: Option<String>,
+    camera_attempted: Option<(Option<String>, CamPreset)>,
     tex: Option<egui::TextureHandle>,
     last_frame: usize,
+    preview_tex: Option<egui::TextureHandle>,
+    last_preview: (usize, bool),
     mic: Option<Started<AudioCapture>>,
     mic_starting: Arc<AtomicBool>,
     mic_slot: Arc<Mutex<Option<Result<Started<AudioCapture>, String>>>>,
@@ -77,8 +81,12 @@ impl Live {
             camera_preset: CamPreset::Bubble,
             camera_starting: Arc::new(AtomicBool::new(false)),
             camera_slot: Arc::new(Mutex::new(None)),
+            camera_failed: None,
+            camera_attempted: None,
             tex: None,
             last_frame: 0,
+            preview_tex: None,
+            last_preview: (0, false),
             mic: None,
             mic_starting: Arc::new(AtomicBool::new(false)),
             mic_slot: Arc::new(Mutex::new(None)),
@@ -116,13 +124,32 @@ impl Live {
         (f32::from_bits(self.mic_level.load(Ordering::Relaxed)), f32::from_bits(self.sys_level.load(Ordering::Relaxed)))
     }
 
+    pub fn retry_camera(&mut self) {
+        self.camera_failed = None;
+        self.camera_attempted = None;
+    }
+
+    pub fn camera_error(&self) -> Option<&str> {
+        self.camera_failed.as_deref()
+    }
+
+    pub fn camera_frame_size(&self) -> Option<(u32, u32)> {
+        self.hub.latest().map(|f| (f.width, f.height))
+    }
+
     /// Start or stop the camera and microphone meter so they match `prefs` and the phase.
-    pub fn sync(&mut self, prefs: &Prefs, phase: Phase, parked: bool, preset: CamPreset) {
+    pub fn sync(&mut self, prefs: &Prefs, phase: Phase, parked: bool, preset: CamPreset, want_system_meter: bool) {
         // finished background starts
         if let Some(r) = self.camera_slot.lock().unwrap().take() {
             match r {
-                Ok(s) => self.camera = Some(s),
-                Err(e) => *self.error.lock().unwrap() = Some(e),
+                Ok(s) => {
+                    self.camera_failed = None;
+                    self.camera = Some(s);
+                }
+                Err(e) => {
+                    self.camera_failed = Some(e.clone());
+                    *self.error.lock().unwrap() = Some(e);
+                }
             }
         }
         if let Some(r) = self.mic_slot.lock().unwrap().take() {
@@ -145,6 +172,12 @@ impl Live {
         // camera
         let want_cam = prefs.camera && in_use;
         let cam_key = prefs.camera_id.clone();
+        if !want_cam {
+            self.camera_failed = None;
+            self.camera_attempted = None;
+        } else if self.camera_attempted.as_ref() != Some(&(cam_key.clone(), preset)) && phase == Phase::Idle {
+            self.camera_failed = None;
+        }
         if let Some(c) = &self.camera {
             if !want_cam || c.key != cam_key || (self.camera_preset != preset && phase == Phase::Idle) {
                 if let Some(c) = self.camera.take() {
@@ -152,10 +185,13 @@ impl Live {
                 }
                 self.hub.clear();
                 self.tex = None;
+                self.preview_tex = None;
+                self.last_preview = (0, false);
             }
         }
-        if want_cam && self.camera.is_none() && !self.camera_starting.swap(true, Ordering::SeqCst) {
+        if want_cam && self.camera.is_none() && self.camera_failed.is_none() && !self.camera_starting.swap(true, Ordering::SeqCst) {
             self.camera_preset = preset;
+            self.camera_attempted = Some((cam_key.clone(), preset));
             let (slot, flag, hub, ctx, id) = (self.camera_slot.clone(), self.camera_starting.clone(), self.hub.clone(), self.ctx.clone(), cam_key.clone());
             std::thread::spawn(move || {
                 let h2 = hub.clone();
@@ -202,8 +238,8 @@ impl Live {
                 ctx.request_repaint();
             });
         }
-        // system-audio meter: only while the bar is showing and the input is on
-        let want_sys = prefs.system_audio && phase == Phase::Idle && !parked;
+        // system-audio meter: only while the bar is showing and the input is active
+        let want_sys = want_system_meter && prefs.system_audio && phase == Phase::Idle && !parked;
         if !want_sys {
             self.sys_failed = false;
             if let Some(c) = self.sys.take() {
@@ -293,5 +329,34 @@ impl Live {
             }
         }
         self.tex.as_ref().map(|t| t.id())
+    }
+
+    /// The current camera picture cropped to match the active aspect ratio for the floating viewfinder.
+    pub fn preview_texture(&mut self, vertical: bool) -> Option<(egui::TextureId, u32, u32)> {
+        let f = self.hub.latest()?;
+        let (cx, cy, cw, ch) = screencraft_capture::camera_capture::crop_for(f.width, f.height, vertical);
+        let ptr = Arc::as_ptr(&f) as usize;
+        if (ptr, vertical) != self.last_preview || self.preview_tex.is_none() {
+            self.last_preview = (ptr, vertical);
+            let long = cw.max(ch).max(1) as f32;
+            let scale = (480.0 / long).min(1.0);
+            let ow = ((cw as f32 * scale).round() as usize).max(2);
+            let oh = ((ch as f32 * scale).round() as usize).max(2);
+            let mut px = Vec::with_capacity(ow * oh);
+            for y in 0..oh {
+                let sy = cy as usize + y * ch as usize / oh;
+                for x in 0..ow {
+                    let sx = cx as usize + x * cw as usize / ow;
+                    let o = (sy * f.width as usize + sx) * 3;
+                    px.push(egui::Color32::from_rgb(f.rgb[o], f.rgb[o + 1], f.rgb[o + 2]));
+                }
+            }
+            let img = egui::ColorImage::new([ow, oh], px);
+            match &mut self.preview_tex {
+                Some(t) => t.set(img, egui::TextureOptions::LINEAR),
+                None => self.preview_tex = Some(self.ctx.load_texture("camera-viewfinder", img, egui::TextureOptions::LINEAR)),
+            }
+        }
+        self.preview_tex.as_ref().map(|t| (t.id(), cw, ch))
     }
 }

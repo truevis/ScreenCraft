@@ -72,16 +72,62 @@ fn ease(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+fn ease_out_cubic(t: f32) -> f32 {
+    1.0 - (1.0 - t).powi(3)
+}
+
+fn ease_out_back(t: f32) -> f32 {
+    let c1 = 1.70158_f32;
+    let c3 = c1 + 1.0;
+    let u = t - 1.0;
+    1.0 + c3 * u * u * u + c1 * u * u
+}
+
 fn c01(v: f32) -> f32 {
     v.clamp(0.0, 1.0)
 }
 
-fn anim_k(a: &Annotation, t: f64) -> f32 {
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AnimState {
+    pub alpha: f32,
+    pub scale: f32,
+    pub dx: f32,
+    pub dy: f32,
+}
+
+pub fn anim_state(a: &Annotation, t: f64, unit: f32) -> AnimState {
     if a.anim == "none" {
-        return 1.0;
+        return AnimState { alpha: 1.0, scale: 1.0, dx: 0.0, dy: 0.0 };
     }
     let ms = a.anim_ms.max(1.0);
-    ease(c01(((t - a.source_start_ms) / ms).min((a.source_end_ms - t) / ms) as f32))
+    let en = c01(((t - a.source_start_ms) / ms) as f32);
+    let ex = c01(((a.source_end_ms - t) / ms) as f32);
+    match a.anim.as_str() {
+        "pop" => {
+            let enter_s = if en < 1.0 { 0.78 + 0.22 * ease_out_back(en) } else { 1.0 };
+            let exit_s = if ex < 1.0 { 0.85 + 0.15 * ease(ex) } else { 1.0 };
+            let enter_a = (en * 1.8).min(1.0);
+            let exit_a = ease(ex);
+            AnimState { alpha: enter_a * exit_a, scale: enter_s * exit_s, dx: 0.0, dy: 0.0 }
+        }
+        "slide" | "slide-up" | "slide-down" | "slide-left" | "slide-right" => {
+            let (vx, vy) = match a.anim.as_str() {
+                "slide-down" => (0.0, -1.0),
+                "slide-left" => (1.0, 0.0),
+                "slide-right" => (-1.0, 0.0),
+                _ => (0.0, 1.0),
+            };
+            let dist = 36.0 * unit;
+            let enter_off = (1.0 - ease_out_cubic(en)) * dist;
+            let exit_off = (1.0 - ease_out_cubic(ex)) * dist * 0.7;
+            let off = enter_off - exit_off;
+            AnimState { alpha: ease(en.min(ex)), scale: 1.0, dx: vx * off, dy: vy * off }
+        }
+        _ => {
+            let k = ease(en.min(ex));
+            AnimState { alpha: k, scale: 1.0, dx: 0.0, dy: 0.0 }
+        }
+    }
 }
 
 fn pm(w: f32, h: f32) -> Option<Pixmap> {
@@ -157,7 +203,7 @@ pub fn decode_image(url: &str, base_dir: Option<&Path>) -> Option<(u32, u32, Vec
     Some((img.width(), img.height(), img.into_raw()))
 }
 
-fn watermark_pixmap(url: &str, base_dir: Option<&Path>) -> Option<Arc<Pixmap>> {
+fn cached_pixmap(url: &str, base_dir: Option<&Path>) -> Option<Arc<Pixmap>> {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     hash_str(url).hash(&mut h);
@@ -213,41 +259,41 @@ fn stroke(px: &mut Pixmap, path: &tiny_skia::Path, c: [f32; 4], w: f32, mask: Op
 }
 
 /// Annotations in `space` ("content" or "screen"). Returns the layer (None when nothing drew).
-fn annotations(p: &Project, cx: &Ctx, space: &str, bounds: &mut Vec<Bound>, effects: &mut Vec<Effect>) -> Option<Arc<Pixmap>> {
+fn annotations(p: &Project, cx: &Ctx, space: &str, bounds: &mut Vec<Bound>, effects: &mut Vec<Effect>, base_dir: Option<&Path>) -> Option<Arc<Pixmap>> {
     let g = cx.g;
     let list = &p.scene.annotations;
+    let content = space == "content";
+    let zoom_k = g.zoom * (g.sr[2] / g.content_r[2].max(1.0));
+    let unit = cx.s * if content { zoom_k } else { 1.0 };
     let any_active = list.iter().any(|a| {
         let a_space = if a.space.is_empty() { "screen" } else { a.space.as_str() };
-        a_space == space && g.t_src >= a.source_start_ms && g.t_src < a.source_end_ms && anim_k(a, g.t_src) > 0.003
+        a_space == space && g.t_src >= a.source_start_ms && g.t_src < a.source_end_ms && anim_state(a, g.t_src, unit).alpha > 0.003
     });
     if !any_active {
         return None;
     }
     let mut layer: Option<Pixmap> = None;
-    let content = space == "content";
     // content annotations are clipped to the rounded screen (allocated lazily only when a layer draws)
     let mut mask: Option<Mask> = None;
     let to_x = |n: f64| g.sr[0] + ((n as f32 - g.view[0]) / g.view[2]) * g.sr[2];
     let to_y = |n: f64| g.sr[1] + ((n as f32 - g.view[1]) / g.view[3]) * g.sr[3];
-    let zoom_k = g.zoom * (g.sr[2] / g.content_r[2].max(1.0));
     for a in list {
         let a_space = if a.space.is_empty() { "screen" } else { a.space.as_str() };
         if a_space != space || g.t_src < a.source_start_ms || g.t_src >= a.source_end_ms {
             continue;
         }
-        let k = anim_k(a, g.t_src);
-        if k <= 0.003 {
+        let anim = anim_state(a, g.t_src, unit);
+        if anim.alpha <= 0.003 {
             continue;
         }
         let x = if content { to_x(a.x) } else { a.x as f32 * g.w };
         let y = if content { to_y(a.y) } else { a.y as f32 * g.h };
         let w = if content { a.w as f32 / g.view[2] * g.sr[2] } else { a.w as f32 * g.w };
         let h = if content { a.h as f32 / g.view[3] * g.sr[3] } else { a.h as f32 * g.h };
-        let unit = cx.s * if content { zoom_k } else { 1.0 };
         let lw = (a.thickness.max(0.0) as f32 * unit).max(1.0);
         let lw = if a.thickness == 0.0 { 5.0 * unit } else { lw };
-        let pop = if a.anim == "pop" { 0.85 + 0.15 * k } else { 1.0 };
-        let ga = if a.anim == "pop" { (k * 1.6).min(1.0) } else { k };
+        let pop = anim.scale;
+        let ga = anim.alpha;
         let col = color_of(if a.color.is_empty() { "#ffffff" } else { &a.color });
         let ensure = |layer: &mut Option<Pixmap>, mask: &mut Option<Mask>| -> bool {
             if layer.is_none() {
@@ -277,7 +323,7 @@ fn annotations(p: &Project, cx: &Ctx, space: &str, bounds: &mut Vec<Bound>, effe
                 let tw = lines.iter().map(|l| font.width(l, fs)).fold(1.0, f32::max);
                 let lh = fs * 1.22;
                 let (bw, bh) = (tw + pad_x * 2.0, lines.len() as f32 * lh + pad_y * 2.0);
-                let (bx, by) = (x - bw * (pop - 1.0) / 2.0, y - bh * (pop - 1.0) / 2.0);
+                let (bx, by) = (x + anim.dx - bw * (pop - 1.0) / 2.0, y + anim.dy - bh * (pop - 1.0) / 2.0);
                 let has_fill = !a.fill.is_empty() && a.fill != "none";
                 if has_fill {
                     if let Some(path) = rr_path(bx, by, bw, bh, fs * 0.28) {
@@ -310,7 +356,7 @@ fn annotations(p: &Project, cx: &Ctx, space: &str, bounds: &mut Vec<Bound>, effe
                 }
                 let px = layer.as_mut().unwrap();
                 let (bw, bh) = (w * pop, h * pop);
-                let (bx, by) = (x + (w - bw) / 2.0, y + (h - bh) / 2.0);
+                let (bx, by) = (x + anim.dx + (w - bw) / 2.0, y + anim.dy + (h - bh) / 2.0);
                 match a.kind.as_str() {
                     "ellipse" => {
                         if let Some(path) = skia::ellipse(bx.min(bx + bw), by.min(by + bh), bw.abs(), bh.abs()) {
@@ -335,17 +381,19 @@ fn annotations(p: &Project, cx: &Ctx, space: &str, bounds: &mut Vec<Bound>, effe
                     continue;
                 }
                 let px = layer.as_mut().unwrap();
+                let (sx, sy) = (x + anim.dx, y + anim.dy);
                 let (x2, y2) = if content { (to_x(a.x2), to_y(a.y2)) } else { (a.x2 as f32 * g.w, a.y2 as f32 * g.h) };
-                let (dx, dy) = (x2 - x, y2 - y);
+                let (x2, y2) = (x2 + anim.dx, y2 + anim.dy);
+                let (dx, dy) = (x2 - sx, y2 - sy);
                 let full = (dx * dx + dy * dy).sqrt();
                 let len = full * pop;
                 let len = if len == 0.0 { 1.0 } else { len };
                 let (ux, uy) = if full > 0.0 { (dx / full, dy / full) } else { (0.0, 0.0) };
-                let (ex, ey) = (x + ux * len, y + uy * len);
+                let (ex, ey) = (sx + ux * len, sy + uy * len);
                 let head = (len * 0.6).min(lw * 4.0 + 10.0 * unit);
                 let ac = with_alpha(if a.color.is_empty() { color_of("#ff453a") } else { col }, ga);
                 let mut pb = PathBuilder::new();
-                pb.move_to(x, y);
+                pb.move_to(sx, sy);
                 pb.line_to(ex - ux * head * 0.6, ey - uy * head * 0.6);
                 if let Some(path) = pb.finish() {
                     stroke(px, &path, ac, lw, mask.as_ref());
@@ -358,7 +406,7 @@ fn annotations(p: &Project, cx: &Ctx, space: &str, bounds: &mut Vec<Bound>, effe
                 if let Some(path) = pb.finish() {
                     fill(px, &path, ac, mask.as_ref());
                 }
-                bounds.push(Bound { id: a.id.clone(), rect: [x.min(x2), y.min(y2), dx.abs(), dy.abs()], arrow: Some([x, y, x2, y2]) });
+                bounds.push(Bound { id: a.id.clone(), rect: [sx.min(x2), sy.min(y2), dx.abs(), dy.abs()], arrow: Some([sx, sy, x2, y2]) });
             }
             "blur" | "pixelate" => {
                 if content && w > 1.0 && h > 1.0 {
@@ -381,9 +429,42 @@ fn annotations(p: &Project, cx: &Ctx, space: &str, bounds: &mut Vec<Bound>, effe
                     pb.push_path(&rp);
                 }
                 if let Some(path) = pb.finish() {
-                    px.fill_path(&path, &paint([0.0, 0.0, 0.0, c01(a.strength as f32) * k]), FillRule::EvenOdd, Transform::identity(), mask.as_ref());
+                    px.fill_path(&path, &paint([0.0, 0.0, 0.0, c01(a.strength as f32) * ga]), FillRule::EvenOdd, Transform::identity(), mask.as_ref());
                 }
                 bounds.push(Bound { id: a.id.clone(), rect: [x, y, w, h], arrow: None });
+            }
+            "image" => {
+                if a.image.is_empty() || w.abs() < 1.0 || h.abs() < 1.0 {
+                    continue;
+                }
+                let Some(img) = cached_pixmap(&a.image, base_dir) else { continue };
+                if !ensure(&mut layer, &mut mask) {
+                    continue;
+                }
+                let px = layer.as_mut().unwrap();
+                let (bw, bh) = (w.abs() * pop, h.abs() * pop);
+                let (bx, by) = (x + anim.dx + (w - bw) / 2.0, y + anim.dy + (h - bh) / 2.0);
+                let (iw, ih) = (img.width() as f32, img.height() as f32);
+                let eff_alpha = c01(a.opacity as f32) * ga;
+                let rad = (a.corner_radius.max(0.0) as f32 * unit).min(bw.min(bh) * 0.5);
+                let mut pp = PixmapPaint::default();
+                pp.quality = tiny_skia::FilterQuality::Bicubic;
+                if rad > 0.5 {
+                    let (lw_u, lh_u) = ((bw.ceil() as u32).max(1), (bh.ceil() as u32).max(1));
+                    if let (Some(mut local), Some(mut lmask)) = (Pixmap::new(lw_u, lh_u), Mask::new(lw_u, lh_u)) {
+                        if let Some(rr) = skia::round_rect(0.0, 0.0, bw, bh, rad) {
+                            lmask.fill_path(&rr, FillRule::Winding, true, Transform::identity());
+                            pp.opacity = 1.0;
+                            local.draw_pixmap(0, 0, (*img).as_ref(), &pp, Transform::from_row(bw / iw, 0.0, 0.0, bh / ih, 0.0, 0.0), Some(&lmask));
+                            pp.opacity = eff_alpha;
+                            px.draw_pixmap(0, 0, local.as_ref(), &pp, Transform::from_translate(bx, by), mask.as_ref());
+                        }
+                    }
+                } else {
+                    pp.opacity = eff_alpha;
+                    px.draw_pixmap(0, 0, (*img).as_ref(), &pp, Transform::from_row(bw / iw, 0.0, 0.0, bh / ih, bx, by), mask.as_ref());
+                }
+                bounds.push(Bound { id: a.id.clone(), rect: [bx, by, bw, bh], arrow: None });
             }
             _ => {}
         }
@@ -465,7 +546,7 @@ fn watermark(p: &Project, cx: &Ctx, px: &mut Option<Pixmap>, base_dir: Option<&P
     if !wm.enabled || wm.image.is_empty() {
         return;
     }
-    let Some(img) = watermark_pixmap(&wm.image, base_dir) else { return };
+    let Some(img) = cached_pixmap(&wm.image, base_dir) else { return };
     let g = cx.g;
     let (iw, ih) = (img.width() as f32, img.height() as f32);
     let w = (if wm.size > 0.0 { wm.size as f32 } else { 0.12 } * g.w).max(8.0);
@@ -496,7 +577,19 @@ fn subtitles(p: &Project, cx: &Ctx, px: &mut Option<Pixmap>) {
     let st = &p.config.subtitles;
     let Some(font) = cx.font_bold.as_ref().or(cx.font.as_ref()) else { return };
     let fs = (if st.size > 0.0 { st.size as f32 } else { 56.0 }) * cx.s;
-    let text = if st.uppercase { cap.text.to_uppercase() } else { cap.text.clone() };
+    let word_count = cap.text.split_whitespace().count();
+    let (raw_text, active_starts) = if !p.scene.slices.is_empty() && word_count > 0 {
+        let kept = screencraft_core::transcript::active_caption_words(cap, &p.scene.slices);
+        if kept.is_empty() {
+            return;
+        }
+        let t_joined = kept.iter().map(|(w, _)| w.as_str()).collect::<Vec<_>>().join(" ");
+        let starts: Vec<f64> = kept.into_iter().map(|(_, s)| s).collect();
+        (t_joined, starts)
+    } else {
+        (cap.text.clone(), cap.word_starts.clone())
+    };
+    let text = if st.uppercase { raw_text.to_uppercase() } else { raw_text };
     let max_w = (fs * 4.0).max(g.w * if st.width > 0.0 { st.width as f32 } else { 0.34 });
     let lines = font.wrap(&text, fs, max_w);
     let lh = fs * 1.16;
@@ -533,8 +626,8 @@ fn subtitles(p: &Project, cx: &Ctx, px: &mut Option<Pixmap>) {
     let toks: Vec<&str> = text.split_whitespace().collect();
     let mut active: i64 = -1;
     if !st.highlight.is_empty() && !toks.is_empty() {
-        if cap.word_starts.len() == toks.len() {
-            for (i, w) in cap.word_starts.iter().enumerate() {
+        if active_starts.len() == toks.len() {
+            for (i, w) in active_starts.iter().enumerate() {
                 if *w <= t {
                     active = i as i64;
                 }
@@ -591,9 +684,9 @@ pub fn build_in(p: &Project, g: &Geom, combos: &[ComboMark], out: (u32, u32), de
     let mut layers = Layers::default();
     layers.under = device_layer(&p.config.styles.device, device_rect, out, screen_radius, s);
     if g.screen_alpha > 0.01 {
-        layers.content = annotations(p, &cx, "content", &mut layers.bounds, &mut layers.effects);
+        layers.content = annotations(p, &cx, "content", &mut layers.bounds, &mut layers.effects, base_dir);
     }
-    let mut top = annotations(p, &cx, "screen", &mut layers.bounds, &mut layers.effects).map(|a| Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()));
+    let mut top = annotations(p, &cx, "screen", &mut layers.bounds, &mut layers.effects, base_dir).map(|a| Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()));
     watermark(p, &cx, &mut top, base_dir);
     keys(p, &cx, combos, &mut top);
     // captions use the heavier weight
@@ -601,4 +694,118 @@ pub fn build_in(p: &Project, g: &Geom, combos: &[ComboMark], out: (u32, u32), de
     subtitles(p, &cx2, &mut top);
     layers.top = top.map(Arc::new);
     layers
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use screencraft_core::project::{Media, Slice, Subtitle};
+
+    fn test_geom(t_src: f64) -> Geom {
+        Geom {
+            w: 400.0,
+            h: 300.0,
+            sr: [0.0, 0.0, 400.0, 300.0],
+            content_r: [0.0, 0.0, 400.0, 300.0],
+            view: [0.0, 0.0, 1.0, 1.0],
+            zoom: 1.0,
+            screen_radius: 0.0,
+            t_src,
+            t_out_ms: t_src,
+            screen_alpha: 1.0,
+        }
+    }
+
+    #[test]
+    fn animation_presets_behave_as_expected() {
+        let mut a = Annotation {
+            source_start_ms: 1000.0,
+            source_end_ms: 3000.0,
+            anim_ms: 250.0,
+            ..Default::default()
+        };
+
+        a.anim = "none".into();
+        let st = anim_state(&a, 1000.0, 1.0);
+        assert_eq!(st, AnimState { alpha: 1.0, scale: 1.0, dx: 0.0, dy: 0.0 });
+
+        a.anim = "fade".into();
+        assert_eq!(anim_state(&a, 1000.0, 1.0).alpha, 0.0);
+        assert!((anim_state(&a, 1125.0, 1.0).alpha - 0.5).abs() < 1e-4);
+        assert_eq!(anim_state(&a, 2000.0, 1.0).alpha, 1.0);
+        assert!((anim_state(&a, 2875.0, 1.0).alpha - 0.5).abs() < 1e-4);
+
+        a.anim = "pop".into();
+        let p_mid_in = anim_state(&a, 1150.0, 1.0);
+        assert!(p_mid_in.alpha > 0.8 && p_mid_in.scale > 0.9);
+        assert_eq!(anim_state(&a, 2000.0, 1.0).scale, 1.0);
+
+        a.anim = "slide".into();
+        let s_start = anim_state(&a, 1000.0, 1.0);
+        assert!((s_start.dy - 36.0).abs() < 1e-4 && s_start.alpha == 0.0);
+        let s_hold = anim_state(&a, 2000.0, 1.0);
+        assert_eq!(s_hold, AnimState { alpha: 1.0, scale: 1.0, dx: 0.0, dy: 0.0 });
+        let s_exit = anim_state(&a, 2950.0, 1.0);
+        assert!(s_exit.dy < 0.0 && s_exit.alpha < 1.0);
+    }
+
+    #[test]
+    fn renders_image_annotation_with_rounded_corners_and_bounds() {
+        let dir = std::env::temp_dir().join(format!("sc-overlay-img-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = image::RgbaImage::from_pixel(32, 32, image::Rgba([255, 60, 40, 255]));
+        img.save(dir.join("badge.png")).unwrap();
+
+        let mut p = Project::from_recording("img", Media { width: 400, height: 300, duration_ms: 2000.0, ..Default::default() });
+        p.scene.annotations.push(Annotation {
+            id: "im1".into(),
+            kind: "image".into(),
+            space: "screen".into(),
+            source_start_ms: 0.0,
+            source_end_ms: 2000.0,
+            x: 0.25,
+            y: 0.25,
+            w: 0.5,
+            h: 0.5,
+            anim: "none".into(),
+            image: "badge.png".into(),
+            opacity: 1.0,
+            corner_radius: 40.0,
+            ..Default::default()
+        });
+        let g = test_geom(1000.0);
+        let layers = build_in(&p, &g, &[], (400, 300), [0.0, 0.0, 400.0, 300.0], 0.0, Some(&dir));
+        assert_eq!(layers.bounds.len(), 1);
+        assert_eq!(layers.bounds[0].rect, [100.0, 75.0, 200.0, 150.0]);
+        let top = layers.top.as_ref().unwrap();
+        // Center pixel is opaque reddish
+        let center = top.pixel(200, 150).unwrap();
+        assert!(center.alpha() > 240 && center.red() > 200);
+        // Very top-left corner inside rect is clipped transparent by corner_radius
+        let corner = top.pixel(100, 75).unwrap();
+        assert_eq!(corner.alpha(), 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn subtitles_hide_cut_words_from_disabled_slices() {
+        let mut p = Project::from_recording("sub", Media { width: 400, height: 300, duration_ms: 2000.0, ..Default::default() });
+        p.scene.slices = vec![
+            Slice { id: "s1".into(), source_start_ms: 0.0, source_end_ms: 500.0, disabled: false, ..Default::default() },
+            Slice { id: "s2".into(), source_start_ms: 500.0, source_end_ms: 1500.0, disabled: true, ..Default::default() },
+        ];
+        p.scene.subtitles.push(Subtitle {
+            id: "c1".into(),
+            source_start_ms: 100.0,
+            source_end_ms: 1400.0,
+            text: "um".into(),
+            word_starts: vec![600.0],
+            word_ends: vec![900.0],
+        });
+        let g = test_geom(700.0);
+        let layers = build_in(&p, &g, &[], (400, 300), [0.0, 0.0, 400.0, 300.0], 0.0, None);
+        assert!(layers.top.is_none(), "entire caption word was cut, so nothing should draw");
+    }
 }

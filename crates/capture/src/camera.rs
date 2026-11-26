@@ -77,7 +77,17 @@ pub fn list() -> Vec<(String, String)> {
         }
     }
     nokhwa::query(ApiBackend::Auto)
-        .map(|v| v.into_iter().map(|i| (i.index().as_index().map(|n| n.to_string()).unwrap_or_default(), i.human_name())).collect())
+        .map(|v| {
+            v.into_iter()
+                .map(|i| {
+                    let id = match i.index() {
+                        CameraIndex::Index(n) => n.to_string(),
+                        CameraIndex::String(s) => s.clone(),
+                    };
+                    (id, i.human_name())
+                })
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -153,6 +163,9 @@ impl Drop for CameraStream {
 /// Open camera `id` (None = the first one) and call `on_frame` for every frame on a worker thread.
 /// Returns once the stream is running or the reason it could not.
 pub fn start(id: Option<&str>, preset: CamPreset, mut on_frame: impl FnMut(CamFrame) + Send + 'static) -> Result<CameraStream, String> {
+    if list().is_empty() {
+        return Err("No camera found. Connect a webcam and try again.".into());
+    }
     // a number is a device index; anything else is a device's unique id (macOS)
     let index = match id {
         Some(s) => s.parse::<u32>().map(CameraIndex::Index).unwrap_or_else(|_| CameraIndex::String(s.to_string())),
@@ -176,19 +189,34 @@ pub fn start(id: Option<&str>, preset: CamPreset, mut on_frame: impl FnMut(CamFr
             let mut opened = None;
             let mut last = String::new();
             // another app (or an earlier session of this one) may still be letting go of the camera:
-            // "Lock Rejected" usually clears within a second, so try a few times before giving up
+            // transient busy/lock errors usually clear within a second, so retry briefly; fail fast otherwise
             'attempts: for attempt in 0..4 {
                 if attempt > 0 {
                     std::thread::sleep(std::time::Duration::from_millis(600));
                 }
+                let mut transient = false;
                 for t in tries.iter().cloned() {
                     match Camera::new(index.clone(), RequestedFormat::new::<RgbFormat>(t)) {
                         Ok(c) => {
                             opened = Some(c);
                             break 'attempts;
                         }
-                        Err(e) => last = e.to_string(),
+                        Err(e) => {
+                            last = e.to_string();
+                            let lower = last.to_lowercase();
+                            if lower.contains("lock rejected")
+                                || lower.contains("busy")
+                                || lower.contains("in use")
+                                || lower.contains("already")
+                                || lower.contains("access")
+                            {
+                                transient = true;
+                            }
+                        }
                     }
+                }
+                if !transient {
+                    break 'attempts;
                 }
             }
             let mut cam = match opened {

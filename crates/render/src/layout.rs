@@ -41,15 +41,16 @@ fn cam_scale(cc: &CameraConfig, p: &Project, zoom: f64) -> f32 {
     1.0 + (cc.zoomed_scale as f32 - 1.0) * f
 }
 
-struct Bubble {
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    rad: f32,
+pub struct Bubble {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub rad: f32,
+    pub pad: f32,
 }
 
-fn bubble_box(p: &Project, cc: &CameraConfig, w: f32, h: f32, zoom: f64, mul: f32) -> Bubble {
+pub fn bubble_box(p: &Project, cc: &CameraConfig, w: f32, h: f32, zoom: f64, mul: f32) -> Bubble {
     let s = h / 1080.0;
     let a = if cc.aspect_ratio > 0.0 { cc.aspect_ratio as f32 } else { 1.0 };
     let m = w.min(h);
@@ -64,6 +65,7 @@ fn bubble_box(p: &Project, cc: &CameraConfig, w: f32, h: f32, zoom: f64, mul: f3
         w: bw,
         h: bh,
         rad: cc.corner_radius_ratio as f32 * bw.min(bh),
+        pad,
     }
 }
 
@@ -73,7 +75,11 @@ pub fn layout_geom(id: u8, cc: &CameraConfig, p: &Project, w: f32, h: f32, r: R,
     let s = h / 1080.0;
     let rad = crate::devices::screen_radius(&p.config.styles.device, p.config.styles.corner_radius as f32 * s, r[3]);
     let bcol = crate::wallpapers::parse_color(if cc.border_color.is_empty() { "#ffffff" } else { &cc.border_color });
-    let look = (if cc.shadow { 1.0 } else { 0.0 }, if cc.border { 1.0 } else { 0.0 }, if cc.mirror { -1.0 } else { 1.0 });
+    let look = (
+        if cc.shadow { cc.shadow_intensity.clamp(0.0, 1.0) as f32 } else { 0.0 },
+        if cc.border { 1.0 } else { 0.0 },
+        if cc.mirror { -1.0 } else { 1.0 },
+    );
     let mk = |sr: R, sa: f32, cr: R, ca: f32, rad: f32| Geo { sr, sa, cr, ca, rad, shadow: look.0, border: look.1, mir: look.2, bcol };
     if !has_cam || id == 0 || id == 1 {
         let b = bubble_box(p, cc, w, h, zoom, 1.0);

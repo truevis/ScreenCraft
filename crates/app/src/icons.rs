@@ -45,6 +45,8 @@ pub fn markup(name: &str) -> &'static str {
         "a-blur" => r#"<circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="7" stroke-dasharray="2 3"/>"#,
         "a-pixelate" => r#"<path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z"/>"#,
         "a-spotlight" => r#"<path d="M4 4h16v16H4z"/><circle cx="12" cy="12" r="4"/>"#,
+        "a-image" => r#"<rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="10" r="1.5"/><path d="M21 15l-5-5L5 19"/>"#,
+        "magnet" => r#"<path d="M6 4v7a6 6 0 0012 0V4M6 4h3v7a3 3 0 006 0V4h3M6 8h3M15 8h3"/>"#,
         "check" => r#"<path d="M5 12l5 5 9-10"/>"#,
         "mic" => r#"<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0014 0M12 18v3"/>"#,
         "monitor" => r#"<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>"#,

@@ -8,6 +8,7 @@ members = [
     "crates/engine",
     "crates/render",
     "crates/app",
+    "crates/mcp",
 ]
 
 [workspace.package]

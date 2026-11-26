@@ -1,8 +1,7 @@
 use super::*;
 
 pub fn show(st: &mut EditorState, ui: &mut Ui) {
-    kit::h3(ui, "Crop", true);
-    note(ui, "Drag the handles on the preview or adjust the edges below.");
+    kit::h3_help(ui, "Crop", true, "Drag the handles on the preview or adjust the edges below.");
     let c = st.project.config.crop;
     let vals = [
         ("Left", "l", c.x * 100.0),

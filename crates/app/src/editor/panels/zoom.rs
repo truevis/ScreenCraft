@@ -37,8 +37,7 @@ fn ztoggle(st: &mut EditorState, ui: &mut Ui, ids: &[String], label: &str, hint:
 pub fn show(st: &mut EditorState, ui: &mut Ui) {
     let zoom = if let Sel::Zoom(id) = &st.sel { st.project.scene.zooms.iter().find(|z| &z.id == id).cloned() } else { None };
     let Some(z) = zoom else {
-        kit::h3(ui, "Zoom", true);
-        note(ui, "Zooms are created automatically from your clicks and typing. Select a zoom block on the timeline to edit it, or add one at the playhead.");
+        kit::h3_help(ui, "Zoom", true, "Zooms are created automatically from your clicks and typing. Select a zoom block on the timeline to edit it, or add one at the playhead.");
         let an = st.project.config.animations.clone();
         slider(st, ui, "zl-default", "Default zoom level", an.default_zoom, (1.2, 4.0, 0.1), |v| format!("{v:.1}×"), |p, v| p.config.animations.default_zoom = v);
         slider(st, ui, "ease-in-default", "Default ease in", an.ease_in_ms / 1000.0, (0.0, 1.5, 0.05), sec2, |p, v| p.config.animations.ease_in_ms = v * 1000.0);
@@ -53,12 +52,13 @@ pub fn show(st: &mut EditorState, ui: &mut Ui) {
     };
     let ids = st.selected_zoom_ids();
     let n = ids.len();
-    kit::h3(ui, &if n > 1 { format!("Zoom regions · {n} selected") } else { "Zoom region".to_string() }, true);
-    if n > 1 {
-        kit::hint(ui, "Showing the first region’s settings. Changing a control applies it to all selected regions.");
+    let title = if n > 1 { format!("Zoom regions · {n} selected") } else { "Zoom region".to_string() };
+    let help = if n > 1 {
+        "Showing the first region’s settings. Changing a control applies it to all selected regions."
     } else {
-        kit::hint(ui, "Shift-click more zoom blocks to edit several at once.");
-    }
+        "Shift-click more zoom blocks to edit several at once."
+    };
+    kit::h3_help(ui, &title, true, help);
     let an = st.project.config.animations.clone();
     let k = z.id.clone();
     zslider(st, ui, &ids, &format!("zl-{k}"), "Zoom level", z.zoom, (1.1, 5.0, 0.05), |v| format!("{v:.2}×"), |r, v| r.zoom = v);

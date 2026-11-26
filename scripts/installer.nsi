@@ -53,6 +53,9 @@ VIAddVersionKey "LegalCopyright" "MIT License"
 Section "ScreenCraft"
   SetOutPath "$INSTDIR"
   File "/oname=ScreenCraft.exe" "${EXE_PATH}"
+!ifdef MCP_EXE_PATH
+  File "/oname=screencraft-mcp.exe" "${MCP_EXE_PATH}"
+!endif
   File "/oname=ScreenCraft.ico" "${ICON_PATH}"
 
   WriteUninstaller "$INSTDIR\Uninstall.exe"
@@ -71,6 +74,7 @@ SectionEnd
 
 Section "Uninstall"
   Delete "$INSTDIR\ScreenCraft.exe"
+  Delete "$INSTDIR\screencraft-mcp.exe"
   Delete "$INSTDIR\ScreenCraft.ico"
   Delete "$INSTDIR\Uninstall.exe"
   RMDir "$INSTDIR"

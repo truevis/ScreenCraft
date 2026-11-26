@@ -4303,8 +4303,6 @@ dependencies = [
  "screencraft-render",
  "serde",
  "serde_json",
- "ureq",
- "whisper-rs",
 ]
 
 [[package]]
@@ -4361,11 +4359,31 @@ version = "0.4.1"
 dependencies = [
  "color_quant",
  "crossbeam-channel",
+ "dirs",
  "gif 0.13.3",
  "screencraft-audio",
  "screencraft-capture",
  "screencraft-core",
  "screencraft-encode",
+ "screencraft-render",
+ "serde",
+ "serde_json",
+ "ureq",
+ "whisper-rs",
+]
+
+[[package]]
+name = "screencraft-mcp"
+version = "0.4.1"
+dependencies = [
+ "base64",
+ "dirs",
+ "image",
+ "png 0.17.16",
+ "screencraft-capture",
+ "screencraft-core",
+ "screencraft-encode",
+ "screencraft-engine",
  "screencraft-render",
  "serde",
  "serde_json",

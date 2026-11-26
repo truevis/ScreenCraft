@@ -3,10 +3,12 @@
 pub mod input;
 pub mod jumpcut;
 pub mod pace;
+pub mod presets;
 pub mod project;
 pub mod spring;
 pub mod timeline;
 pub mod track;
+pub mod transcript;
 pub mod zoom;
 
 pub use input::{CursorKind, InputLog};

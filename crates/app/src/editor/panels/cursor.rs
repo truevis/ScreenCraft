@@ -71,9 +71,8 @@ pub fn show(st: &mut EditorState, ui: &mut Ui) {
         color(st, ui, "click-color", "Effect color", &c.click_effect_color, |p, v| p.config.cursor.click_effect_color = v);
     }
 
-    kit::h3(ui, "Camera motion", false);
+    kit::h3_help(ui, "Camera motion", false, "Zoomed views keep the cursor in the middle of the screen. While you type, the camera moves to the text caret (grant Accessibility in Permissions).");
     seg(st, ui, Some("Follow"), &[("center".to_string(), "Keep centered"), ("edge".to_string(), "Only near edges")], a.follow.clone(), |p, v| p.config.animations.follow = v);
-    kit::hint(ui, "Zoomed views keep the cursor in the middle of the screen. While you type, the camera moves to the text caret (grant Accessibility in Permissions).");
     slider(st, ui, "follow-smooth", "Camera smoothness", a.follow_smooth_ms / 1000.0, (0.1, 1.2, 0.05), sec2, |p, v| p.config.animations.follow_smooth_ms = v * 1000.0);
     slider(st, ui, "typing-smooth", "Typing follow", a.typing_smooth_ms / 1000.0, (0.05, 0.8, 0.05), sec2, |p, v| p.config.animations.typing_smooth_ms = v * 1000.0);
     slider(st, ui, "cursor-smooth", "Cursor smoothing", a.cursor_smooth_ms / 1000.0, (0.0, 0.5, 0.01), sec2, |p, v| p.config.animations.cursor_smooth_ms = v * 1000.0);

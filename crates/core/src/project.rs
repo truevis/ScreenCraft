@@ -137,7 +137,7 @@ impl Default for Transition {
 }
 
 /// Something drawn over the video for a stretch of the recording.
-/// `kind`: text | box | ellipse | arrow | highlight | blur | pixelate | spotlight.
+/// `kind`: text | box | ellipse | arrow | highlight | blur | pixelate | spotlight | image.
 /// `space`: "content" is pinned to the recording (moves and scales with the camera),
 /// "screen" is fixed on the output frame. Coordinates are 0..1 of that space.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -164,9 +164,15 @@ pub struct Annotation {
     pub thickness: f64,
     /// Blur / pixelate strength 0..1, spotlight dim 0..1.
     pub strength: f64,
-    /// fade | pop | none
+    /// fade | pop | slide | none
     pub anim: String,
     pub anim_ms: f64,
+    /// Image path inside `.screencraft` package (or data URL) when `kind == "image"`.
+    pub image: String,
+    /// Image opacity 0..1.
+    pub opacity: f64,
+    /// Image corner radius in px at 1080p.
+    pub corner_radius: f64,
 }
 
 impl Default for Annotation {
@@ -191,6 +197,9 @@ impl Default for Annotation {
             strength: 0.6,
             anim: "fade".into(),
             anim_ms: 250.0,
+            image: String::new(),
+            opacity: 1.0,
+            corner_radius: 12.0,
         }
     }
 }
@@ -206,11 +215,20 @@ pub struct Subtitle {
     /// Source time each word of `text` starts at (generated captions); empty when unknown,
     /// in which case the words are spread evenly over the caption.
     pub word_starts: Vec<f64>,
+    /// Source time each word of `text` ends at (generated captions); empty when unknown.
+    pub word_ends: Vec<f64>,
 }
 
 impl Default for Subtitle {
     fn default() -> Self {
-        Self { id: String::new(), source_start_ms: 0.0, source_end_ms: 0.0, text: String::new(), word_starts: Vec::new() }
+        Self {
+            id: String::new(),
+            source_start_ms: 0.0,
+            source_end_ms: 0.0,
+            text: String::new(),
+            word_starts: Vec::new(),
+            word_ends: Vec::new(),
+        }
     }
 }
 
@@ -438,6 +456,8 @@ pub struct CameraConfig {
     /// Scale applied to the camera while zoomed in.
     pub zoomed_scale: f64,
     pub shadow: bool,
+    /// Shadow opacity multiplier 0..1 when `shadow` is true.
+    pub shadow_intensity: f64,
     pub border: bool,
     /// Border colour (hex) used when `border` is on.
     pub border_color: String,
@@ -456,6 +476,7 @@ impl Default for CameraConfig {
             corner_radius_ratio: 0.25,
             zoomed_scale: 0.7,
             shadow: true,
+            shadow_intensity: 0.5,
             border: false,
             border_color: "#ffffff".into(),
         }
@@ -801,5 +822,17 @@ mod tests {
         let q: Project = serde_json::from_str(r#"{"name":"x","config":{"cursor":{"size":40}}}"#).unwrap();
         assert_eq!(q.config.cursor.size, 40.0);
         assert_eq!(q.config.styles.corner_radius, 0.0);
+        assert_eq!(q.config.camera.shadow_intensity, 0.5);
+    }
+
+    #[test]
+    fn legacy_annotation_and_subtitle_deserialize_with_defaults() {
+        let a: Annotation = serde_json::from_str(r#"{"id":"a1","kind":"text","text":"hi"}"#).unwrap();
+        assert_eq!(a.image, "");
+        assert_eq!(a.opacity, 1.0);
+        assert_eq!(a.corner_radius, 12.0);
+        let s: Subtitle = serde_json::from_str(r#"{"id":"s1","sourceStartMs":0,"sourceEndMs":500,"text":"hello"}"#).unwrap();
+        assert!(s.word_ends.is_empty());
+        assert!(s.word_starts.is_empty());
     }
 }

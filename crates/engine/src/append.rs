@@ -156,9 +156,6 @@ pub struct Appended {
 pub fn append(target: &Path, extra: &Path, mut progress: impl FnMut(f32) -> bool) -> Result<Appended, String> {
     let pkg = Package::open(target);
     let mut project: Project = pkg.load_project()?;
-    if project.media.camera_only {
-        return Err("adding footage to a camera-only video isn't supported yet".into());
-    }
     if project.media.mic.is_some() {
         return Err("this project keeps its microphone in a separate file, which can't be joined yet".into());
     }
@@ -244,17 +241,22 @@ pub fn append(target: &Path, extra: &Path, mut progress: impl FnMut(f32) -> bool
     progress(0.92);
     exporter.finish().map_err(|e| fail(e.to_string()))?;
 
-    // cursor log: the project's own, then the added part's, moved after it
+    // cursor log: the project's own, then the added part's, moved after it (skipped for webcam-only projects)
     let base_ms = parts[0].duration_ms;
     let added_ms = parts[1].duration_ms;
-    let mut log = parts[0].input.clone().unwrap_or_default();
-    if let (Some(extra_log), Some(from)) = (&parts[1].input, parts[1].bounds) {
-        let moved = shift_input(extra_log, from, project.media.bounds, base_ms);
-        log.moves.extend(moved.moves);
-        log.clicks.extend(moved.clicks);
-        log.keys.extend(moved.keys);
-        log.carets.extend(moved.carets);
-    }
+    let log = if project.media.camera_only {
+        InputLog::default()
+    } else {
+        let mut l = parts[0].input.clone().unwrap_or_default();
+        if let (Some(extra_log), Some(from)) = (&parts[1].input, parts[1].bounds) {
+            let moved = shift_input(extra_log, from, project.media.bounds, base_ms);
+            l.moves.extend(moved.moves);
+            l.clicks.extend(moved.clicks);
+            l.keys.extend(moved.keys);
+            l.carets.extend(moved.carets);
+        }
+        l
+    };
     let input_name = fresh_name(&pkg.dir, "input", "json");
     std::fs::write(pkg.dir.join(&input_name), serde_json::to_vec(&log).map_err(|e| fail(e.to_string()))?).map_err(|e| fail(e.to_string()))?;
 

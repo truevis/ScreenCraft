@@ -88,7 +88,7 @@ pub fn layout_name(k: &str) -> &str {
     LAYOUT_NAMES.iter().find(|(id, _)| *id == k).map(|x| x.1).unwrap_or(k)
 }
 
-pub const NOTE_NAMES: [(&str, &str); 8] = [
+pub const NOTE_NAMES: [(&str, &str); 9] = [
     ("text", "Text"),
     ("box", "Box"),
     ("ellipse", "Ellipse"),
@@ -97,6 +97,7 @@ pub const NOTE_NAMES: [(&str, &str); 8] = [
     ("blur", "Blur"),
     ("pixelate", "Pixelate"),
     ("spotlight", "Spotlight"),
+    ("image", "Image"),
 ];
 
 pub fn note_name(k: &str) -> &str {
@@ -124,6 +125,9 @@ pub fn new_annotation(kind: &str, id: String, start: f64, end: f64) -> Annotatio
         strength: 0.6,
         anim: "fade".into(),
         anim_ms: 250.0,
+        image: String::new(),
+        opacity: 1.0,
+        corner_radius: 12.0,
     };
     let set = |a: &mut Annotation, space: &str, x: f64, y: f64, w: f64, h: f64| {
         a.space = space.into();
@@ -170,6 +174,11 @@ pub fn new_annotation(kind: &str, id: String, start: f64, end: f64) -> Annotatio
         "spotlight" => {
             set(&mut a, "content", 0.3, 0.3, 0.4, 0.3);
             a.strength = 0.65;
+        }
+        "image" => {
+            set(&mut a, "screen", 0.35, 0.35, 0.3, 0.3);
+            a.opacity = 1.0;
+            a.corner_radius = 12.0;
         }
         _ => {}
     }

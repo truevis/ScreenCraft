@@ -88,3 +88,53 @@ fn upright_feed_is_used_as_it_is() {
     assert_eq!((p.media.width, p.media.height), (720, 1280));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn can_append_to_camera_only_project() {
+    let base_dir = std::env::temp_dir().join(format!("sc-camonly-append-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base_dir);
+    std::fs::create_dir_all(&base_dir).unwrap();
+
+    let rec_one = |name: &str| {
+        let pkg = Package::open(base_dir.join(format!("{name}.screencraft")));
+        let hub = CameraHub::new();
+        let stop = Arc::new(AtomicBool::new(false));
+        let t = feed(hub.clone(), stop.clone(), 640, 360);
+        let rec = Recording::start(RecordOptions {
+            target: Target::Camera { vertical: false },
+            fps: 30,
+            max_long_side: None,
+            system_audio: false,
+            microphone: false,
+            microphone_id: None,
+            output: pkg.clone(),
+            camera: Some(CameraSpec { id: None, hub }),
+            bitrate_kbps: Some(2000),
+            hardware: HwPreference::Software,
+        })
+        .expect("start");
+        std::thread::sleep(Duration::from_millis(800));
+        let fin = rec.stop().expect("stop");
+        stop.store(true, Ordering::SeqCst);
+        t.join().unwrap();
+        (fin.project, pkg)
+    };
+
+    let (p1, pkg1) = rec_one("part1");
+    let (p2, pkg2) = rec_one("part2");
+    let expected_min = p1.media.duration_ms + p2.media.duration_ms - 50.0;
+
+    let app = screencraft_engine::append::append(&pkg1.dir, &pkg2.dir, |_| true).expect("append camera-only");
+    assert!(app.added_ms > 400.0);
+
+    let merged = pkg1.load_project().unwrap();
+    assert!(merged.media.camera_only);
+    assert!(merged.media.duration_ms >= expected_min, "duration={}", merged.media.duration_ms);
+    assert_eq!(merged.scene.slices.len(), 2);
+
+    let mut v = VideoSource::open(&pkg1.screen_path(&merged)).expect("open merged video");
+    let f = v.frame(2);
+    assert!(f.is_ok(), "{:?}", f.err());
+
+    let _ = std::fs::remove_dir_all(&base_dir);
+}

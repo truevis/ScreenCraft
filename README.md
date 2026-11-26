@@ -25,6 +25,7 @@
   <a href="#what-it-does">Features</a> ·
   <a href="#install">Install</a> ·
   <a href="#using-it">Using it</a> ·
+  <a href="#mcp-server">MCP Server</a> ·
   <a href="#shortcuts">Shortcuts</a> ·
   <a href="#how-it-is-built">How it is built</a> ·
   <a href="#development">Development</a> ·
@@ -64,6 +65,7 @@ Intel + NVIDIA graphics and high-DPI displays.
 - Timeline audio waveform combines both system audio and microphone tracks (so microphone audio is visible even when system audio is silent).
 
 **Features**
+- **Webcam-only recording (`Camera`):** record straight from a webcam (16:9 or `9:16` vertical) with a live draggable floating viewfinder above the bar, microphone capture, and automatic pause jump-cuts on open.
 - **Projects menu:** New recording, Open project…, **Record more for this project**, and **Add a
   recording or video to this project** (joined onto the end, existing edits kept).
 - **Discard** button in the editor top bar with a confirmation dialog to permanently delete the open
@@ -72,6 +74,22 @@ Intel + NVIDIA graphics and high-DPI displays.
 - Music **ripples** when a clip is trimmed or deleted.
 - Defaults tuned for **professional app demos**: edge-to-edge video on black, subtitle-style
   captions, click ripple, 1.6× auto-zoom, on-screen shortcuts, music ducked under speech.
+- **Transcript-based video editing:** clickable word-level transcript in the Captions tab with
+  `Shift`-click range selection, 1-click filler word removal, clickable pause pills, `Del` to
+  create non-destructive jump cuts, and click-to-restore for struck-through words.
+- **Offline subtitle translation:** **Translate to English** toggle in the Captions panel powered
+  by multilingual `whisper.cpp` models.
+- **Timed image annotations & animation presets:** drop logos/callouts onto the Notes track
+  (stored in the `.screencraft` package) with opacity, corner radius, `Shift`-resize aspect lock,
+  and `None` / `Fade` / `Pop` / `Slide` entrance/exit presets with adjustable speed.
+- **Timeline magnetic snapping:** toolbar **Snap** toggle (`Alt` to temporarily bypass) with an
+  amber snap guide line and ruler timestamp badge.
+- **Richer webcam PiP controls:** drag and corner-resize the camera bubble directly on the preview
+  with 8-point edge/corner snapping (`Alt` for free placement), `Circle` shape preset, horizontal
+  mirror, and independent shadow strength.
+- **Local MCP server (`screencraft-mcp`):** standalone stdio JSON-RPC server installed beside
+  `ScreenCraft.exe` so coding agents can record, inspect transcripts, edit timelines, preview
+  frames, and export videos without bloating the GUI app.
 - The built-in update check is removed.
 
 **Build tooling**
@@ -93,10 +111,7 @@ The recorder bar:
 ## What it does
 
 **Recording**
-- A floating bar at the bottom of the screen: **Display / Window / Area** (drag out the area on the
-  desktop), camera, microphone and system audio with level meters, resolution and frame rate, and a
-  3-2-1 countdown. While recording it shrinks to a timer, meters, discard and Stop, and a thin red
-  border (kept out of the video) marks the area being recorded.
+- A floating bar at the bottom of the screen: **Display / Window / Area / Camera** (drag out an area on the desktop, or record webcam-only with a live floating viewfinder and a `9:16` portrait toggle), camera, microphone and system audio with level meters, resolution and frame rate, and a 3-2-1 countdown. While recording it shrinks to a timer, meters, discard and Stop, and a thin red border (kept out of the video) marks the area being recorded.
 - System audio (WASAPI loopback) and the microphone as separate, time-aligned tracks; the camera is
   recorded to its own file.
 - The pointer is not baked into the picture. Cursor motion, clicks and shortcuts are logged on the
@@ -110,20 +125,26 @@ The recorder bar:
 
 **Editing** (one window per project; a **Save** button, `Ctrl+S`, and unsaved edits are asked about before it closes)
 - **Timeline:** video, zoom, camera, notes (annotations), captions and music tracks. Trim, split,
-  reorder, duplicate, per-clip speed, idle fast-forward, speed ramps and freeze frames. Edits ripple:
-  zooms, captions and notes follow the footage, and music after a trimmed or deleted clip moves
-  with it. Zooms are generated automatically the first time a recording opens.
+  reorder, duplicate, per-clip speed, idle fast-forward, speed ramps, freeze frames, and **magnetic
+  snapping** (`Alt` to bypass) with visual snap guides. Edits ripple: zooms, captions and notes
+  follow the footage, and music after a trimmed or deleted clip moves with it. Zooms are generated
+  automatically the first time a recording opens.
 - **Full-screen preview** (`F11`, or the button beside the preview quality; `Esc` leaves).
 - **Zoom and pan:** automatic regions from clicks and typing, or your own; follow the cursor or hold a point.
 - **Cursor and motion:** size, four styles, smoothing, click effects, highlight, camera smoothness.
 - **Appearance:** twelve procedural wallpapers (still or drifting / bokeh / waves / dust), gradient,
   colour or your own image, optional blur, padding, corners, shadow, watermark, and **device frames**
   (laptop, monitor, tablet, phone, browser).
-- **Camera:** a bubble or side-by-side / large / camera-only layouts, changing over time in blocks.
-- **Annotate:** text, arrows, boxes, circles, highlights, blur, pixelate and spotlight, dragged on
-  the preview; on-screen **shortcut display**.
-- **Captions:** on-device speech recognition with whisper.cpp (the model is downloaded once, audio
-  never leaves the machine), SRT import / export, Subtitle / Minimal / TikTok styles.
+- **Camera:** a bubble (`Circle`, `Square`, `4:3`, `16:9`, `3:4`) or side-by-side / large /
+  camera-only layouts, dragged and resized directly on the preview with 8-point snapping, horizontal
+  mirror, independent shadow strength, and per-block overrides over time.
+- **Annotate:** text, arrows, boxes, circles, highlights, timed **images**, blur, pixelate and
+  spotlight, dragged on the preview with `None` / `Fade` / `Pop` / `Slide` animations; on-screen
+  **shortcut display**.
+- **Captions & transcript editing:** on-device speech recognition and **Translate to English** with
+  `whisper.cpp` (the model is downloaded once, audio never leaves the machine), word-level
+  **transcript editing** (cut words, filler words, or pause gaps straight from the transcript, or
+  restore them any time), SRT import / export, and Subtitle / Minimal / TikTok styles.
 - **Transitions** at cuts: dissolve, fade, flash, blur, slide, zoom.
 - **Audio:** levels, **music** clips with fades and ducking under speech, and click / typing **sound effects**.
 - **Crop, aspect ratio, presets, undo / redo and raw-file access.**
@@ -168,9 +189,8 @@ Build from source:
 
 ## Using it
 
-1. Pick **Display / Window / Area**, choose the camera and audio inputs, and press **Record** (or
-   **Ctrl+Shift+R**). Press **Stop** in the bar, or press **Ctrl+Shift+R** again.
-2. The recording opens in the editor with zooms already generated from your clicks and typing.
+1. Pick **Display / Window / Area / Camera** (`9:16` toggle for vertical areas or talking-head webcams), choose the camera and audio inputs, and press **Record** (or **Ctrl+Shift+R**). Press **Stop** in the bar, or press **Ctrl+Shift+R** again.
+2. The recording opens in the editor with zooms generated for screen recordings or pause jump-cuts generated for webcam-only recordings.
 3. Adjust the look, trim and split, add annotations, captions and music, then **Export**.
 
 **Locations**
@@ -178,6 +198,31 @@ Build from source:
   (local time); the location can be changed from the **Projects** menu.
 - Settings: `%APPDATA%\ScreenCraft\settings.json`
 - Log: `%LOCALAPPDATA%\ScreenCraft\screencraft.log`
+
+## MCP server
+
+`screencraft-mcp.exe` is installed next to `ScreenCraft.exe` in `%LOCALAPPDATA%\Programs\ScreenCraft`
+and speaks MCP (Model Context Protocol) over stdio JSON-RPC so coding agents (Antigravity, Claude
+Code, Cursor, etc.) can record demos, inspect transcripts and click logs, edit projects, render PNG
+frames for visual verification, and export MP4 / WebM / GIF files headlessly.
+
+Example client configuration:
+
+```json
+{
+  "mcpServers": {
+    "screencraft": {
+      "command": "%LOCALAPPDATA%\\Programs\\ScreenCraft\\screencraft-mcp.exe"
+    }
+  }
+}
+```
+
+Exposed tools:
+- **Projects:** `list_projects`, `get_project_summary` (timeline, transcript, click & shortcut events)
+- **Recording:** `list_capture_sources`, `start_recording` (`display` / `window` / `area` / webcam-only `camera` with `vertical`), `stop_recording`
+- **Editing:** `trim_or_cut`, `set_clip_speed`, `add_zoom`, `add_annotation`, `apply_preset`, `generate_captions`
+- **Inspection & Export:** `render_frame` (returns base64 PNG), `export_video`
 
 ### Shortcuts
 
@@ -198,6 +243,7 @@ Build from source:
 | `screencraft-render` | The wgpu compositor (WGSL), the CPU-side scene builder and the tiny-skia overlays (device frames, annotations, captions). Shared by the preview and the exporter. |
 | `screencraft-engine` | The recording session (screen, audio, camera), project packages, frame / audio sources, the soundtrack mixer, and the export, GIF and compressor jobs. |
 | `screencraft` (`crates/app`) | The egui application, plus `screencraft-shot`, a headless screenshot tool. |
+| `screencraft-mcp` (`crates/mcp`) | Standalone local stdio MCP server for agent-driven recording, editing, frame inspection, and export. |
 
 Things worth knowing:
 
@@ -213,7 +259,7 @@ Things worth knowing:
 
 A `.screencraft` package contains `screen.mp4` (H.264 video plus one Opus track per audio source),
 `camera.mp4` (when the camera was on), `input.json` (cursor, clicks, keys), `project.json` and any
-music files you added.
+music or annotation/background image files you added.
 
 ## Development
 
@@ -246,8 +292,8 @@ components ScreenCraft uses, and [COMPLIANCE.md](COMPLIANCE.md) for the legal an
 
 ## Known limitations
 
-- Adding footage to a project re-encodes its whole screen video; camera video of the added part is
-  not carried over, and camera-only projects can't be added to yet.
+- Adding footage to a project re-encodes its whole video track; overlay camera bubble video from an added part is
+  not carried over.
 - HEVC export / compression is not built; the compressor reads H.264 MP4s and carries Opus audio only.
 - Large sources (5K+) decode slower than real time when scrubbing.
 - The installer is unsigned, so Windows SmartScreen may warn on first launch.

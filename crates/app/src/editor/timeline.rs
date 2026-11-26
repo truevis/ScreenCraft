@@ -17,15 +17,28 @@ const TRACK_GAP: f32 = 6.0;
 const HANDLE_W: f32 = 11.0;
 const ZOOM_MAX: f64 = 60.0;
 
-#[derive(Default)]
 pub struct View {
     /// 1 = the whole project fits the viewport.
     pub zoom: f64,
     /// Horizontal scroll in px when zoomed in.
     pub scroll_x: f32,
     pub fit_pending: bool,
+    pub snap_enabled: bool,
     drag: Option<Drag>,
     preview: Option<Preview>,
+}
+
+impl Default for View {
+    fn default() -> Self {
+        Self {
+            zoom: 0.0,
+            scroll_x: 0.0,
+            fit_pending: false,
+            snap_enabled: true,
+            drag: None,
+            preview: None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -149,6 +162,12 @@ fn tools(st: &mut EditorState, ui: &mut egui::Ui) {
                     Err(e) => e,
                 };
                 st.tab = Tab::Pace;
+            }
+            if kit::pill(ui, Some("magnet"), "Snap", st.timeline.snap_enabled, true, false, None)
+                .on_hover_text("Magnetic snapping to playhead and block edges (hold Alt to temporarily bypass)")
+                .clicked()
+            {
+                st.timeline.snap_enabled = !st.timeline.snap_enabled;
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Speed of the selected clip
@@ -373,10 +392,17 @@ fn build_blocks(st: &mut EditorState, ctx: &egui::Context) -> (Vec<Block>, Vec<(
         let color = match an.kind.as_str() {
             "blur" | "pixelate" => BLOCK_NOTE_BLUR,
             "spotlight" => BLOCK_NOTE_SPOT,
+            "image" => BLOCK_NOTE_IMAGE,
             "arrow" | "box" | "ellipse" | "highlight" => BLOCK_NOTE_SHAPE,
             _ => BLOCK_NOTE,
         };
-        let label = if an.kind == "text" { format!("“{}”", an.text.chars().take(28).collect::<String>()) } else { ops::note_name(&an.kind).to_string() };
+        let label = if an.kind == "text" {
+            format!("“{}”", an.text.chars().take(28).collect::<String>())
+        } else if an.kind == "image" {
+            format!("Image · {}", an.image.chars().take(20).collect::<String>())
+        } else {
+            ops::note_name(&an.kind).to_string()
+        };
         blocks.push(Block {
             kind: Kind::Annot,
             id: an.id.clone(),
@@ -570,7 +596,7 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
         hint(2, "Change how the camera looks over time: add a layout from the Camera tab.");
     }
     if empty_annots {
-        hint(3, "Text, arrows, blur and spotlight appear here: add them from the Annotate tab.");
+        hint(3, "Text, arrows, images, blur and spotlight appear here: add them from the Annotate tab.");
     }
     if empty_caps {
         hint(4, "Captions go here: add them from the Captions tab, or import an SRT.");
@@ -754,15 +780,24 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
                     if (pos.x - x0).abs() >= 3.0 || moved {
                         moved = true;
                         let d = (pos.x - x0) as f64 / ppm;
-                        let snap_on = !ui.ctx().input(|i| i.modifiers.alt);
+                        let snap_on = st.timeline.snap_enabled ^ ui.ctx().input(|i| i.modifiers.alt);
                         let snap_tol = 8.0 / ppm.max(1e-6);
+                        let skip_ids: Vec<String> = if group {
+                            if kind == Kind::Zoom {
+                                st.selected_zoom_ids()
+                            } else {
+                                st.selected_caption_ids()
+                            }
+                        } else {
+                            vec![id.clone()]
+                        };
                         let mut targets: Vec<f64> = Vec::with_capacity(blocks.len() * 2 + 3);
                         if snap_on {
                             targets.push(0.0);
                             targets.push(total);
                             targets.push(st.playhead_ms);
                             for b in &blocks {
-                                if b.id != id {
+                                if !skip_ids.contains(&b.id) {
                                     targets.push(b.a);
                                     targets.push(b.b);
                                 }
@@ -772,11 +807,7 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
                             if !snap_on {
                                 return None;
                             }
-                            targets
-                                .iter()
-                                .copied()
-                                .filter(|t| (*t - val).abs() <= snap_tol)
-                                .min_by(|a, b| (a - val).abs().partial_cmp(&(b - val).abs()).unwrap_or(std::cmp::Ordering::Equal))
+                            find_snap_target(val, &targets, snap_tol)
                         };
                         let mut prev = Preview { id: id.clone(), a: a0, b: b0, drop: None, music: None, snap_line: None };
                         let mut edge_src: Option<f64> = None;
@@ -787,29 +818,12 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
                                     Mode::Move => {
                                         let w = b0 - a0;
                                         let raw_a = (a0 + d).clamp(0.0, (total - w).max(0.0));
-                                        let raw_b = raw_a + w;
-                                        let sa = find_snap(raw_a);
-                                        let sb = find_snap(raw_b);
-                                        let snapped = match (sa, sb) {
-                                            (Some(ta), Some(tb)) => {
-                                                if (ta - raw_a).abs() <= (tb - raw_b).abs() {
-                                                    prev.snap_line = Some(ta);
-                                                    ta
-                                                } else {
-                                                    prev.snap_line = Some(tb);
-                                                    tb - w
-                                                }
-                                            }
-                                            (Some(ta), None) => {
-                                                prev.snap_line = Some(ta);
-                                                ta
-                                            }
-                                            (None, Some(tb)) => {
-                                                prev.snap_line = Some(tb);
-                                                tb - w
-                                            }
-                                            (None, None) => raw_a,
+                                        let (snapped, guide) = if snap_on {
+                                            snap_move_range(raw_a, w, &targets, snap_tol)
+                                        } else {
+                                            (raw_a, None)
                                         };
+                                        prev.snap_line = guide;
                                         prev.a = snapped.clamp(0.0, (total - w).max(0.0));
                                         prev.b = prev.a + w;
                                     }
@@ -1031,7 +1045,12 @@ fn body(st: &mut EditorState, ui: &mut egui::Ui) {
     if let Some(snap_t) = pv.as_ref().and_then(|p| p.snap_line) {
         let sx = x_of(snap_t);
         if sx >= tracks_clip.min.x && sx <= tracks_clip.max.x {
-            tpainter.line_segment([Pos2::new(sx, tracks_clip.min.y), Pos2::new(sx, tracks_clip.max.y)], Stroke::new(1.0, alpha(ACCENT_2, 0.75)));
+            tpainter.line_segment([Pos2::new(sx, tracks_clip.min.y), Pos2::new(sx, tracks_clip.max.y)], Stroke::new(1.5, alpha(SNAP_GUIDE, 0.9)));
+            let tag = fmt_ruler(snap_t);
+            let tw = kit::text_width(ui, &tag, 10.0) + 10.0;
+            let badge = Rect::from_center_size(Pos2::new(sx, ruler_rect.min.y + 11.0), Vec2::new(tw, 16.0));
+            rpainter.rect_filled(badge, CornerRadius::same(4), SNAP_GUIDE);
+            rpainter.text(badge.center(), Align2::CENTER_CENTER, tag, kit::font(10.0), Color32::from_rgb(0x16, 0x1a, 0x22));
         }
     }
     // transition markers
@@ -1404,5 +1423,53 @@ fn commit(st: &mut EditorState, kind: Kind, id: &str, mode: Mode, group: bool, a
             }
         }
         Kind::Ramp => {}
+    }
+}
+
+fn find_snap_target(val: f64, targets: &[f64], tol: f64) -> Option<f64> {
+    targets
+        .iter()
+        .copied()
+        .filter(|t| (*t - val).abs() <= tol)
+        .min_by(|a, b| (a - val).abs().partial_cmp(&(b - val).abs()).unwrap_or(std::cmp::Ordering::Equal))
+}
+
+fn snap_move_range(raw_a: f64, width: f64, targets: &[f64], tol: f64) -> (f64, Option<f64>) {
+    let raw_b = raw_a + width;
+    match (find_snap_target(raw_a, targets, tol), find_snap_target(raw_b, targets, tol)) {
+        (Some(ta), Some(tb)) => {
+            if (ta - raw_a).abs() <= (tb - raw_b).abs() {
+                (ta, Some(ta))
+            } else {
+                (tb - width, Some(tb))
+            }
+        }
+        (Some(ta), None) => (ta, Some(ta)),
+        (None, Some(tb)) => (tb - width, Some(tb)),
+        (None, None) => (raw_a, None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn magnetic_snap_picks_nearest_target_for_either_edge() {
+        let targets = [0.0, 1000.0, 2500.0, 5000.0];
+        // Leading edge near 1000 ms
+        let (a, g) = snap_move_range(992.0, 400.0, &targets, 15.0);
+        assert_eq!(a, 1000.0);
+        assert_eq!(g, Some(1000.0));
+
+        // Trailing edge near 2500 ms (2093 + 400 = 2493)
+        let (a, g) = snap_move_range(2093.0, 400.0, &targets, 15.0);
+        assert_eq!(a, 2100.0);
+        assert_eq!(g, Some(2500.0));
+
+        // Outside tolerance -> no snap
+        let (a, g) = snap_move_range(1500.0, 400.0, &targets, 15.0);
+        assert_eq!(a, 1500.0);
+        assert_eq!(g, None);
     }
 }

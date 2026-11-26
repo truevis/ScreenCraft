@@ -62,3 +62,36 @@ fn records_a_synthetic_screen_into_a_package() {
     assert!(peak > 0.3 && peak < 0.7, "tone peak {peak}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn pause_and_resume_excludes_paused_interval() {
+    let dir = std::env::temp_dir().join(format!("sc-engine-pause-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let package = Package::open(dir.join("p.screencraft"));
+    let rec = Recording::start_with(
+        RecordOptions {
+            target: Target::Display(None),
+            fps: 30,
+            max_long_side: None,
+            system_audio: true,
+            microphone: false,
+            microphone_id: None,
+            output: package.clone(),
+            camera: None,
+            bitrate_kbps: Some(4000),
+            hardware: screencraft_encode::HwPreference::Software,
+        },
+        Box::new(Synthetic { stop: Arc::new(AtomicBool::new(false)), thread: None }),
+    )
+    .expect("start");
+    std::thread::sleep(Duration::from_millis(600));
+    rec.set_paused(true);
+    std::thread::sleep(Duration::from_millis(800));
+    rec.set_paused(false);
+    std::thread::sleep(Duration::from_millis(600));
+    let done = rec.stop().expect("stop");
+    // Total wall time is ~2000ms, active time is ~1200ms.
+    assert!(done.duration_ms < 1650.0, "paused time was not excluded: duration {}", done.duration_ms);
+    assert!(done.duration_ms > 800.0, "active time too short: duration {}", done.duration_ms);
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -1,0 +1,23 @@
+[package]
+name = "screencraft-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Local stdio Model Context Protocol (MCP) server for ScreenCraft"
+
+[[bin]]
+name = "screencraft-mcp"
+path = "src/main.rs"
+
+[dependencies]
+screencraft-core = { path = "../core" }
+screencraft-capture = { path = "../capture" }
+screencraft-encode = { path = "../encode" }
+screencraft-render = { path = "../render" }
+screencraft-engine = { path = "../engine", features = ["whisper"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+png = "0.17"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
+dirs = "7"

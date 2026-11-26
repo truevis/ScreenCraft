@@ -380,6 +380,27 @@ pub(crate) fn render_frame_gpu(
     gpu.render(&scene);
 }
 
+/// Render a single output frame at `t_out_ms` (after jump cuts and speeds) to tightly packed RGBA8.
+pub fn render_frame_at(package: &Package, project: &Project, t_out_ms: f64, resolution: u32) -> Result<(u32, u32, Vec<u8>), String> {
+    const FPS: f64 = 30.0;
+    let effective = project.effective();
+    let log = package.load_input(&effective);
+    let track = compute_track(&effective, &log, FPS);
+    if track.count == 0 {
+        return Err("nothing to render: the timeline is empty".into());
+    }
+    let i = ((t_out_ms.max(0.0) * FPS / 1000.0).round() as usize).min(track.count - 1);
+    let (w, h) = output_size(&effective, resolution.clamp(144, 2160));
+    let (w, h) = (even_down(w), even_down(h));
+    let mut src = crate::source::MultiSource::open(package, &effective)?;
+    let other = track.other_alpha.get(i).filter(|a| **a > 0.003).map(|_| track.other_t_src[i]);
+    let frames = src.fetch(track.t_src[i], other)?;
+    let mut gpu = Compositor::headless()?;
+    upload_frames(&mut gpu, &frames);
+    let rgba = render_frame(&mut gpu, &effective, &track, i, (w, h), 0.0, Some(&package.dir))?;
+    Ok((w, h, rgba))
+}
+
 /// Render frame `i`, blending sub-frames across the camera's motion when `blur` > 0 (a port of the
 /// 0.3 exporter's motion blur).
 pub(crate) fn render_frame(

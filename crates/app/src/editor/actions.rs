@@ -178,6 +178,7 @@ impl EditorState {
                     source_start_ms: s,
                     source_end_ms: e.max(s + 200.0),
                     word_starts: vec![],
+                    word_ends: vec![],
                 });
             }
         });
@@ -186,14 +187,39 @@ impl EditorState {
 
     pub fn export_srt(&mut self) {
         let slices = self.project.scene.slices.clone();
+        let to_eff = |src_ms: f64| -> Option<f64> {
+            let disp = ops::src_to_out(&slices, src_ms)?;
+            Some(screencraft_core::timeline::display_to_effective(&slices, disp))
+        };
         let mut items: Vec<srt::Item> = self
             .project
             .scene
             .subtitles
             .iter()
             .filter_map(|c| {
-                let (s, e) = (ops::src_to_out(&slices, c.source_start_ms)?, ops::src_to_out(&slices, c.source_end_ms)?);
-                (!c.text.trim().is_empty()).then(|| srt::Item { start: s, end: e, text: c.text.clone() })
+                let spans = screencraft_core::transcript::word_spans(c);
+                if spans.is_empty() {
+                    return None;
+                }
+                let kept: Vec<(String, f64, f64)> = spans
+                    .iter()
+                    .filter(|(_, s, e)| !screencraft_core::transcript::is_range_cut(&slices, *s, *e))
+                    .cloned()
+                    .collect();
+                if kept.is_empty() {
+                    return None;
+                }
+                let all_kept = kept.len() == spans.len();
+                let src_s = if all_kept { c.source_start_ms } else { kept[0].1 };
+                let src_e = if all_kept { c.source_end_ms } else { kept[kept.len() - 1].2 };
+                let s = to_eff(src_s).or_else(|| to_eff(kept[0].1))?;
+                let e = to_eff(src_e).or_else(|| to_eff(kept[kept.len() - 1].2))?.max(s + 100.0);
+                let text = if all_kept {
+                    c.text.clone()
+                } else {
+                    kept.into_iter().map(|(w, _, _)| w).collect::<Vec<_>>().join(" ")
+                };
+                (!text.trim().is_empty()).then_some(srt::Item { start: s, end: e, text })
             })
             .collect();
         if items.is_empty() {
@@ -208,6 +234,28 @@ impl EditorState {
         }
     }
 
+    /// Cut source ranges out of the timeline as non-destructive jump cuts.
+    pub fn cut_source_ranges(&mut self, ranges: &[[f64; 2]]) {
+        if ranges.is_empty() {
+            return;
+        }
+        let mut ids: Vec<String> = (0..ranges.len() * 2 + 4).map(|_| self.new_id("slice")).collect();
+        self.edit(|p| {
+            screencraft_core::transcript::cut_ranges(&mut p.scene.slices, ranges, || ids.pop().unwrap_or_else(|| "slice-x".into()));
+        });
+    }
+
+    /// Restore previously cut source ranges back into active playback.
+    pub fn restore_source_ranges(&mut self, ranges: &[[f64; 2]]) {
+        if ranges.is_empty() {
+            return;
+        }
+        let mut ids: Vec<String> = (0..ranges.len() * 2 + 4).map(|_| self.new_id("slice")).collect();
+        self.edit(|p| {
+            screencraft_core::transcript::restore_ranges(&mut p.scene.slices, ranges, || ids.pop().unwrap_or_else(|| "slice-x".into()));
+        });
+    }
+
     /// Start whisper.cpp on this recording's microphone.
     pub fn start_captions(&mut self) {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -216,6 +264,7 @@ impl EditorState {
         self.panel.caps.rx = Some(rx);
         self.panel.caps.busy = true;
         self.panel.caps.msg = "Starting…".into();
+        self.panel.caps.frac = None;
         crate::whisper::spawn(
             tx,
             crate::whisper::Request {
@@ -223,6 +272,7 @@ impl EditorState {
                 project: self.project.clone(),
                 model: self.panel.caps.model.clone(),
                 language: self.panel.caps.language.clone(),
+                translate: self.panel.caps.translate,
                 cancel,
             },
         );
@@ -249,9 +299,13 @@ impl EditorState {
                             source_start_ms: c.start_ms,
                             source_end_ms: c.end_ms,
                             word_starts: c.word_starts,
+                            word_ends: c.word_ends,
                         });
                     }
                 });
+                self.panel.caps.view_transcript = true;
+                self.panel.caps.selected_words.clear();
+                self.panel.caps.anchor_word = None;
                 self.select(Sel::None);
             }
         }

@@ -47,24 +47,44 @@ fn bubble_controls(st: &mut EditorState, ui: &mut Ui, c: &CameraConfig, target: 
     sld!("size", "Size", c.size_ratio, (0.1, 0.6, 0.01), pct, |c: &mut CameraConfig, x| c.size_ratio = x);
     sld!("round", "Roundness", c.corner_radius_ratio, (0.0, 0.5, 0.01), |v| format!("{}%", (v * 200.0).round()), |c: &mut CameraConfig, x| c.corner_radius_ratio = x);
     sld!("zs", "Scale while zoomed", c.zoomed_scale, (0.4, 1.0, 0.01), pct, |c: &mut CameraConfig, x| c.zoomed_scale = x);
-    let mut ar = c.aspect_ratio;
-    let shapes: [(f64, &str); 4] = [(1.0, "Square"), (4.0 / 3.0, "4:3"), (16.0 / 9.0, "16:9"), (3.0 / 4.0, "3:4")];
-    // pick the nearest so a float round trip never loses the highlight
-    let cur = shapes.iter().map(|s| s.0).min_by(|a, b| (a - ar).abs().partial_cmp(&(b - ar).abs()).unwrap_or(std::cmp::Ordering::Equal)).unwrap();
-    let mut cur_i = shapes.iter().position(|s| s.0 == cur).unwrap();
-    let opts: Vec<(usize, &str)> = shapes.iter().enumerate().map(|(i, s)| (i, s.1)).collect();
+    let ar = c.aspect_ratio;
+    let ratios: [(f64, &str); 4] = [(1.0, "Square"), (4.0 / 3.0, "4:3"), (16.0 / 9.0, "16:9"), (3.0 / 4.0, "3:4")];
+    let is_circle = (ar - 1.0).abs() < 0.05 && c.corner_radius_ratio >= 0.48;
+    let mut cur_i = if is_circle {
+        0
+    } else {
+        let cur = ratios.iter().map(|s| s.0).min_by(|a, b| (a - ar).abs().partial_cmp(&(b - ar).abs()).unwrap_or(std::cmp::Ordering::Equal)).unwrap();
+        1 + ratios.iter().position(|s| s.0 == cur).unwrap()
+    };
+    let opts: Vec<(usize, &str)> = std::iter::once((0, "Circle")).chain(ratios.iter().enumerate().map(|(i, s)| (i + 1, s.1))).collect();
     if kit::segmented(ui, Some("Shape"), &opts, &mut cur_i) {
-        ar = shapes[cur_i].0;
-        edit_cam(st, &t, &k("shape"), |c| c.aspect_ratio = ar);
+        if cur_i == 0 {
+            edit_cam(st, &t, &k("shape"), |c| {
+                c.aspect_ratio = 1.0;
+                c.corner_radius_ratio = 0.5;
+            });
+        } else {
+            let new_ar = ratios[cur_i - 1].0;
+            edit_cam(st, &t, &k("shape"), |c| {
+                c.aspect_ratio = new_ar;
+                if cur_i == 1 && c.corner_radius_ratio >= 0.48 {
+                    c.corner_radius_ratio = 0.25;
+                }
+            });
+        }
     }
     if let Some((x, y)) = kit::pos_grid(ui, "Position", (c.position.x, c.position.y)) {
         edit_cam(st, &t, &k("pos"), |c| c.position = Point { x, y });
     }
+    kit::hint(ui, "Drag or resize the camera directly on the preview (hold Alt for free placement).");
     tog!("Flush to the frame edge", Some("Ignore the padding and sit right on the edge of the video."), c.edge_flush, |c: &mut CameraConfig, b| c.edge_flush = b);
     if !c.edge_flush {
         sld!("pad", "Padding", c.padding_ratio, (0.0, 2.0, 0.05), |v| format!("{}", (v * 100.0).round() / 100.0), |c: &mut CameraConfig, x| c.padding_ratio = x);
     }
     tog!("Shadow", None, c.shadow, |c: &mut CameraConfig, b| c.shadow = b);
+    if c.shadow {
+        sld!("sh-int", "Shadow strength", c.shadow_intensity, (0.0, 1.0, 0.05), pct, |c: &mut CameraConfig, x| c.shadow_intensity = x);
+    }
     tog!("Border", None, c.border, |c: &mut CameraConfig, b| c.border = b);
     if c.border {
         let mut hex = if c.border_color.is_empty() { "#ffffff".to_string() } else { c.border_color.clone() };
@@ -76,6 +96,13 @@ fn bubble_controls(st: &mut EditorState, ui: &mut Ui, c: &CameraConfig, target: 
 
 pub fn show(st: &mut EditorState, ui: &mut Ui) {
     kit::h3(ui, "Camera", true);
+    if st.project.media.camera_only {
+        note(
+            ui,
+            "This is a webcam-only recording — your camera is the main video track. Use Appearance, Crop, Zoom, Captions, and Pace to style and edit it.",
+        );
+        return;
+    }
     if st.project.media.camera.is_none() {
         note(ui, "This recording has no camera track. Enable a camera in the recorder toolbar before recording.");
         return;
@@ -85,9 +112,8 @@ pub fn show(st: &mut EditorState, ui: &mut Ui) {
     let lay = if let Sel::Layout(id) = &st.sel { blocks.iter().find(|l| &l.id == id).cloned() } else { None };
 
     let add_tiles = |st: &mut EditorState, ui: &mut Ui, title: &str, intro: &str| {
-        kit::h3(ui, title, false);
-        note(ui, intro);
-        ui.add_space(6.0);
+        kit::h3_help(ui, title, false, intro);
+        ui.add_space(4.0);
         let kinds = ["bubble", "side-right", "side-left", "camera", "large", "hidden"];
         let mut pick = None;
         kit::grid(ui, 2, kinds.len(), 6.0, 34.0, |ui, i, cell| {
@@ -119,7 +145,7 @@ pub fn show(st: &mut EditorState, ui: &mut Ui) {
                 b
             }
         };
-        kit::h3(ui, "Camera block", false);
+        kit::h3_help(ui, "Camera block", false, "Drag the purple block on the Camera track to move it, its ends to trim. The camera eases between blocks.");
         let names: Vec<(String, &str)> = ops::LAYOUT_NAMES.iter().map(|(a, b)| (a.to_string(), *b)).collect();
         let id = l.id.clone();
         let mut cur = l.layout.clone();
@@ -130,7 +156,6 @@ pub fn show(st: &mut EditorState, ui: &mut Ui) {
                 }
             });
         }
-        kit::hint(ui, "Drag the purple block on the Camera track to move it, its ends to trim. The camera eases between blocks.");
         kit::h3(ui, "This block's camera", false);
         bubble_controls(st, ui, &settings, &Target::Layout(l.id.clone()), &format!("blk-{}-", l.id));
         if kit::btn_line(ui, "Remove this block", true).clicked() {

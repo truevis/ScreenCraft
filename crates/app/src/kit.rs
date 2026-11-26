@@ -66,6 +66,21 @@ pub fn h3(ui: &mut Ui, text: &str, first: bool) {
     ui.add_space(10.0 - ui.spacing().item_spacing.y);
 }
 
+/// Section heading with a compact `?` help icon tooltip.
+pub fn h3_help(ui: &mut Ui, text: &str, first: bool, help: &str) {
+    ui.add_space(if first { 2.0 } else { 18.0 });
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 15.0), Sense::hover());
+    let w = spaced_text(ui, Pos2::new(rect.min.x, rect.min.y + 1.0), &text.to_uppercase(), 10.5, MUTED, 1.26);
+    let icon_r = Rect::from_center_size(Pos2::new(rect.min.x + w + 13.0, rect.center().y), Vec2::splat(14.0));
+    let resp = ui.interact(icon_r.expand(2.0), ui.id().with(("h3-help", text)), Sense::hover());
+    let hov = resp.hovered();
+    ui.painter().circle_filled(icon_r.center(), 7.0, if hov { RAISE } else { PANEL_2 });
+    ui.painter().circle_stroke(icon_r.center(), 7.0, Stroke::new(1.0, LINE_2));
+    ui.painter().text(icon_r.center(), Align2::CENTER_CENTER, "?", font(10.0), if hov { Color32::WHITE } else { MUTED });
+    resp.on_hover_cursor(egui::CursorIcon::Help).on_hover_text(help);
+    ui.add_space(10.0 - ui.spacing().item_spacing.y);
+}
+
 /// Wrapped muted text (`.hint` / `.muted`).
 pub fn hint(ui: &mut Ui, text: &str) {
     ui.add_space(2.0);
@@ -385,6 +400,48 @@ pub fn btn_line_w(ui: &mut Ui, text: &str, danger: bool, w: f32) -> Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 33.0), Sense::click());
     let hov = resp.hovered();
     ui.painter().rect_filled(rect, CornerRadius::same(7), if hov { RAISE } else { PANEL_2 });
+    if hov {
+        ui.painter().rect_stroke(rect, CornerRadius::same(7), Stroke::new(1.0, LINE_2), StrokeKind::Inside);
+    } else {
+        dashed_rect(ui, rect.shrink(0.5), Stroke::new(1.0, LINE_2));
+    }
+    ui.painter().text(rect.center(), Align2::CENTER_CENTER, text, font(13.0), if danger { rgb_danger() } else { rgb_btn() });
+    ui.add_space(2.0);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A full-width dashed button with an integrated progress bar fill.
+pub fn btn_progress(ui: &mut Ui, text: &str, frac: Option<f32>, danger: bool) -> Response {
+    ui.add_space(2.0);
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 33.0), Sense::click());
+    let hov = resp.hovered();
+    ui.painter().rect_filled(rect, CornerRadius::same(7), if hov { RAISE } else { PANEL_2 });
+    if let Some(f) = frac {
+        let f = f.clamp(0.0, 1.0);
+        let fill_w = rect.width() * f;
+        if fill_w > 0.5 {
+            let fill_rect = Rect::from_min_size(rect.min, Vec2::new(fill_w, rect.height()));
+            ui.painter().rect_filled(fill_rect, CornerRadius::same(7), alpha(ACCENT, 0.28));
+            let bar_x1 = (rect.min.x + fill_w).min(rect.max.x - 2.0);
+            let bar_x0 = rect.min.x + 2.0;
+            if bar_x1 > bar_x0 {
+                let bar = Rect::from_min_max(Pos2::new(bar_x0, rect.max.y - 2.5), Pos2::new(bar_x1, rect.max.y));
+                ui.painter().rect_filled(bar, CornerRadius::same(2), ACCENT_2);
+            }
+        }
+    } else {
+        let t = ui.ctx().input(|i| i.time) as f32;
+        let bar_w = rect.width() * 0.30;
+        let phase = (t * 0.75) % 1.0;
+        let start = rect.min.x - bar_w + phase * (rect.width() + bar_w);
+        let x0 = start.max(rect.min.x + 1.0);
+        let x1 = (start + bar_w).min(rect.max.x - 1.0);
+        if x1 > x0 {
+            let slide = Rect::from_min_max(Pos2::new(x0, rect.min.y + 1.0), Pos2::new(x1, rect.max.y - 1.0));
+            ui.painter().rect_filled(slide, CornerRadius::same(6), alpha(ACCENT, 0.25));
+        }
+        ui.ctx().request_repaint();
+    }
     if hov {
         ui.painter().rect_stroke(rect, CornerRadius::same(7), Stroke::new(1.0, LINE_2), StrokeKind::Inside);
     } else {

@@ -3,12 +3,13 @@ use crate::editor::{ops, Sel};
 use crate::theme::*;
 use eframe::egui::{Align2, Color32, CornerRadius, Sense, Stroke, StrokeKind, Vec2};
 
-const ADD: [(&str, &str, &str); 8] = [
+const ADD: [(&str, &str, &str); 9] = [
     ("text", "Text", "a-text"),
     ("arrow", "Arrow", "a-arrow"),
     ("box", "Box", "a-box"),
     ("ellipse", "Circle", "a-ellipse"),
     ("highlight", "Highlight", "a-highlight"),
+    ("image", "Image", "a-image"),
     ("blur", "Blur", "a-blur"),
     ("pixelate", "Pixelate", "a-pixelate"),
     ("spotlight", "Spotlight", "a-spotlight"),
@@ -35,26 +36,29 @@ fn with_alpha(rgb: &str, a: f64) -> String {
 }
 
 pub fn show(st: &mut EditorState, ui: &mut Ui) {
-    kit::h3(ui, "Annotate", true);
-    note(ui, "Add something at the playhead, then drag it on the preview. Blur and spotlight stay on the same spot of the recording as the camera zooms.");
-    ui.add_space(10.0);
+    kit::h3_help(ui, "Annotate", true, "Add something at the playhead, then drag it on the preview. Blur and spotlight stay on the same spot of the recording as the camera zooms.");
+    ui.add_space(4.0);
     let mut add = None;
-    kit::grid(ui, 4, ADD.len(), 6.0, 62.0, |ui, i, cell| {
+    kit::grid(ui, 3, ADD.len(), 6.0, 58.0, |ui, i, cell| {
         let (kind, name, icon) = ADD[i];
         let resp = kit::cell_response(ui, cell, ("add", i));
         let hov = resp.hovered();
         ui.painter().rect_filled(cell, CornerRadius::same(8), if hov { RAISE } else { PANEL_2 });
         ui.painter().rect_stroke(cell, CornerRadius::same(8), Stroke::new(1.0, if hov { ACCENT_2 } else { LINE_2 }), StrokeKind::Inside);
         let fg = if hov { Color32::WHITE } else { Color32::from_rgb(0xcd, 0xd6, 0xe8) };
-        crate::icons::paint(ui, icon, eframe::egui::Rect::from_center_size(eframe::egui::Pos2::new(cell.center().x, cell.min.y + 21.0), Vec2::splat(20.0)), fg);
-        ui.painter().text(eframe::egui::Pos2::new(cell.center().x, cell.max.y - 13.0), Align2::CENTER_CENTER, name, kit::font(11.0), fg);
+        crate::icons::paint(ui, icon, eframe::egui::Rect::from_center_size(eframe::egui::Pos2::new(cell.center().x, cell.min.y + 20.0), Vec2::splat(20.0)), fg);
+        ui.painter().text(eframe::egui::Pos2::new(cell.center().x, cell.max.y - 12.0), Align2::CENTER_CENTER, name, kit::font(11.0), fg);
         if resp.on_hover_text(format!("Add {} at the playhead", name.to_lowercase())).clicked() {
             add = Some(kind);
         }
     });
     ui.add_space(4.0);
     if let Some(k) = add {
-        st.add_annotation(k);
+        if k == "image" {
+            st.add_image_annotation();
+        } else {
+            st.add_annotation(k);
+        }
     }
 
     let list = st.project.scene.annotations.clone();
@@ -64,7 +68,13 @@ pub fn show(st: &mut EditorState, ui: &mut Ui) {
     } else if !list.is_empty() {
         kit::h3(ui, "On the timeline", false);
         for it in &list {
-            let label = if it.kind == "text" { format!("Text · {}", it.text.chars().take(26).collect::<String>()) } else { ops::note_name(&it.kind).to_string() };
+            let label = if it.kind == "text" {
+                format!("Text · {}", it.text.chars().take(26).collect::<String>())
+            } else if it.kind == "image" {
+                format!("Image · {}", it.image.chars().take(24).collect::<String>())
+            } else {
+                ops::note_name(&it.kind).to_string()
+            };
             if note_row(ui, &label).clicked() {
                 st.select(Sel::Annot(it.id.clone()));
             }
@@ -161,11 +171,52 @@ fn edit_annotation(st: &mut EditorState, ui: &mut Ui, a: &screencraft_core::proj
         if kit::slider(ui, "Dim outside", &mut s, 0.2, 0.95, 0.05, pct) {
             edit!("an-st", |x: &mut screencraft_core::project::Annotation| x.strength = s);
         }
+    } else if k == "image" {
+        if kit::btn_line(ui, "Replace image…", false).clicked() {
+            match crate::imgdata::pick_and_save_image_with_size(&st.package.dir, "annot", 1920) {
+                Ok(Some((file, iw, ih))) => {
+                    let (ow, oh) = screencraft_render::output_size(&st.project, 1080);
+                    let ratio = (iw as f64 / ih.max(1) as f64) / (ow as f64 / oh.max(1) as f64);
+                    edit!("an-img", |x: &mut screencraft_core::project::Annotation| {
+                        x.image = file;
+                        if ratio > 0.05 {
+                            x.h = (x.w / ratio).clamp(0.05, 0.9);
+                        }
+                    });
+                }
+                Ok(None) => {}
+                Err(e) => st.error = Some(e),
+            }
+        }
+        let mut op = a.opacity;
+        if kit::slider(ui, "Opacity", &mut op, 0.05, 1.0, 0.05, pct) {
+            edit!("an-op", |x: &mut screencraft_core::project::Annotation| x.opacity = op);
+        }
+        let mut cr = a.corner_radius;
+        if kit::slider(ui, "Corner radius", &mut cr, 0.0, 80.0, 1.0, px) {
+            edit!("an-cr", |x: &mut screencraft_core::project::Annotation| x.corner_radius = cr);
+        }
     }
-    if matches!(k.as_str(), "text" | "arrow" | "box" | "ellipse" | "highlight") {
+    if matches!(k.as_str(), "text" | "arrow" | "box" | "ellipse" | "highlight" | "image") {
         let mut an = a.anim.clone();
-        if kit::segmented(ui, Some("Appears"), &[("fade".to_string(), "Fade"), ("pop".to_string(), "Pop"), ("none".to_string(), "Instant")], &mut an) {
+        if kit::segmented(
+            ui,
+            Some("Appears"),
+            &[
+                ("none".to_string(), "None"),
+                ("fade".to_string(), "Fade"),
+                ("pop".to_string(), "Pop"),
+                ("slide".to_string(), "Slide"),
+            ],
+            &mut an,
+        ) {
             edit!("an-anim", |x: &mut screencraft_core::project::Annotation| x.anim = an.clone());
+        }
+        if a.anim != "none" {
+            let mut ms = a.anim_ms;
+            if kit::slider(ui, "Animation speed", &mut ms, 100.0, 800.0, 25.0, |v| format!("{v:.0} ms")) {
+                edit!("an-anim-ms", |x: &mut screencraft_core::project::Annotation| x.anim_ms = ms);
+            }
         }
         let mut sp = a.space.clone();
         if kit::segmented(ui, Some("Stays"), &[("content".to_string(), "On the recording"), ("screen".to_string(), "On the frame")], &mut sp) {

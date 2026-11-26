@@ -6,14 +6,21 @@ use screencraft_encode::color::{default_threads, to_i420, PixelOrder};
 use screencraft_encode::{Container, Effort, ExportSettings, FileSink, HwPreference, ThreadedExporter, VideoCodec, VideoConfig};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
+
+#[derive(Default)]
+struct PauseClock {
+    paused_at: Option<u64>,
+    paused_total_ns: u64,
+}
 
 pub struct CameraRecorder {
     stop: Arc<AtomicBool>,
     /// Clock time (ns) of the first camera frame; u64::MAX until one arrives.
     first_ns: Arc<AtomicU64>,
+    pause: Arc<Mutex<PauseClock>>,
     join: Option<JoinHandle<Result<(), String>>>,
 }
 
@@ -44,7 +51,8 @@ impl CameraRecorder {
         let exporter = ThreadedExporter::spawn(ExportSettings { container: Container::Mp4, video, audio: vec![] }, Box::new(sink)).map_err(|e| e.to_string())?;
         let stop = Arc::new(AtomicBool::new(false));
         let first_ns = Arc::new(AtomicU64::new(u64::MAX));
-        let (stop2, first2) = (stop.clone(), first_ns.clone());
+        let pause = Arc::new(Mutex::new(PauseClock::default()));
+        let (stop2, first2, pause2) = (stop.clone(), first_ns.clone(), pause.clone());
         let join = std::thread::Builder::new()
             .name("screencraft-camera-rec".into())
             .spawn(move || -> Result<(), String> {
@@ -52,7 +60,13 @@ impl CameraRecorder {
                 let mut t0: Option<u64> = None;
                 let mut last_pts: i64 = -1;
                 let mut handle = |f: Arc<CamFrame>, t0: &mut Option<u64>| -> Result<(), String> {
-                    let ns = clock.ns_of(f.at);
+                    let ns = {
+                        let p = pause2.lock().unwrap();
+                        if p.paused_at.is_some() {
+                            return Ok(());
+                        }
+                        clock.ns_of(f.at).saturating_sub(p.paused_total_ns)
+                    };
                     let base = *t0.get_or_insert_with(|| {
                         first2.store(ns, Ordering::SeqCst);
                         ns
@@ -95,7 +109,18 @@ impl CameraRecorder {
                 Ok(())
             })
             .map_err(|e| e.to_string())?;
-        Ok(Self { stop, first_ns, join: Some(join) })
+        Ok(Self { stop, first_ns, pause, join: Some(join) })
+    }
+
+    pub fn set_paused(&self, paused: bool, at_ns: u64) {
+        let mut p = self.pause.lock().unwrap();
+        if paused {
+            if p.paused_at.is_none() {
+                p.paused_at = Some(at_ns);
+            }
+        } else if let Some(start) = p.paused_at.take() {
+            p.paused_total_ns += at_ns.saturating_sub(start);
+        }
     }
 
     /// Stop and finish the file. Returns the camera's clock offset in ms (`camera time = source

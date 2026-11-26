@@ -16,6 +16,7 @@ use screencraft_capture::cfr::Cfr;
 use screencraft_capture::input::InputTracker;
 use screencraft_capture::pixels::crop_scale;
 use screencraft_capture::{create_capturer, CameraCapturer, CaptureRequest, Capturer, Event, StartInfo, Target};
+use screencraft_core::input::InputLog;
 use screencraft_core::project::{Media, Project, Rect};
 use screencraft_encode::color::{default_threads, to_i420, PixelOrder};
 use screencraft_encode::{
@@ -95,6 +96,8 @@ pub struct Finished {
 }
 
 enum Ctl {
+    Pause { at_ns: u64 },
+    Resume { at_ns: u64 },
     Stop { end_ns: u64 },
 }
 
@@ -118,6 +121,7 @@ struct WorkerResult {
     frames: u64,
     duration_ms: f64,
     origin_ns: u64,
+    pause_windows: Vec<(u64, u64)>,
 }
 
 struct Tracks {
@@ -321,8 +325,14 @@ impl Recording {
         let deadline = std::time::Instant::now() + Duration::from_secs(6);
         while rec.first_frame.lock().unwrap().is_none() {
             if std::time::Instant::now() > deadline {
+                let camera_only = rec.opts.camera_only();
                 let _ = rec.abort();
-                return Err("screen capture produced no frames (check the Screen Recording permission)".into());
+                return Err(if camera_only {
+                    "camera capture produced no frames (check that the camera is connected and not in use by another app)"
+                } else {
+                    "screen capture produced no frames (check the Screen Recording permission)"
+                }
+                .into());
             }
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -342,6 +352,15 @@ impl Recording {
             Some(t0) => self.clock.now_ns().saturating_sub(t0) as f64 / 1e6,
             None => 0.0,
         }
+    }
+
+    pub fn set_paused(&self, paused: bool) {
+        let at_ns = self.clock.now_ns();
+        if let Some(c) = &self.camera {
+            c.set_paused(paused, at_ns);
+        }
+        let msg = if paused { Ctl::Pause { at_ns } } else { Ctl::Resume { at_ns } };
+        let _ = self.ctl.send(msg);
     }
 
     fn abort(&mut self) -> Result<(), String> {
@@ -382,7 +401,8 @@ impl Recording {
 
         let camera_done = self.camera.take().and_then(|c| c.finish(result.origin_ns));
         let zero = self.clock.epoch() + Duration::from_nanos(result.origin_ns);
-        let log = self.tracker.take().map(|t| t.finish(zero, self.info.bounds)).unwrap_or_default();
+        let mut log = self.tracker.take().map(|t| t.finish(zero, self.info.bounds)).unwrap_or_default();
+        remap_input_log(&mut log, result.origin_ns, &result.pause_windows);
         let json = serde_json::to_vec(&log).map_err(|e| e.to_string())?;
         std::fs::write(self.opts.output.dir.join("input.json"), json).map_err(|e| e.to_string())?;
 
@@ -456,6 +476,10 @@ fn worker_loop(
     let mut held_audio: Vec<AudioBlock> = Vec::new();
     let mut frames_sent = 0u64;
     let mut end_ns: Option<u64> = None;
+    let mut paused_at: Option<u64> = None;
+    let mut paused_total_ns: u64 = 0;
+    let mut last_resume_ns: u64 = 0;
+    let mut pause_windows: Vec<(u64, u64)> = Vec::new();
 
     let track_of = |s: Source| match s {
         Source::System => tracks.system,
@@ -513,20 +537,47 @@ fn worker_loop(
     loop {
         select! {
             recv(cap_rx) -> ev => match ev {
-                Ok(Event::Frame(f)) => handle_frame(&mut cfr, &mut origin, f)?,
-                Ok(Event::SystemAudio(b)) => match origin {
-                    Some(o) => feed(&mut aligners, b, o)?,
-                    None => held_audio.push(b),
-                },
+                Ok(Event::Frame(mut f)) => {
+                    if paused_at.is_none() && f.pts_ns >= last_resume_ns {
+                        f.pts_ns = f.pts_ns.saturating_sub(paused_total_ns);
+                        handle_frame(&mut cfr, &mut origin, f)?;
+                    }
+                }
+                Ok(Event::SystemAudio(mut b)) => {
+                    if paused_at.is_none() && b.pts_ns >= last_resume_ns {
+                        b.pts_ns = b.pts_ns.saturating_sub(paused_total_ns);
+                        match origin {
+                            Some(o) => feed(&mut aligners, b, o)?,
+                            None => held_audio.push(b),
+                        }
+                    }
+                }
                 Ok(Event::Ended(_)) | Err(_) => { if end_ns.is_none() { end_ns = Some(u64::MAX); } break; }
             },
-            recv(audio_rx) -> b => if let Ok(b) = b {
-                match origin {
-                    Some(o) => feed(&mut aligners, b, o)?,
-                    None => held_audio.push(b),
+            recv(audio_rx) -> b => if let Ok(mut b) = b {
+                if paused_at.is_none() && b.pts_ns >= last_resume_ns {
+                    b.pts_ns = b.pts_ns.saturating_sub(paused_total_ns);
+                    match origin {
+                        Some(o) => feed(&mut aligners, b, o)?,
+                        None => held_audio.push(b),
+                    }
                 }
             },
             recv(ctl_rx) -> c => match c {
+                Ok(Ctl::Pause { at_ns }) => {
+                    if paused_at.is_none() {
+                        paused_at = Some(at_ns);
+                    }
+                    stats.mic_peak.store(0.0f32.to_bits(), Ordering::Relaxed);
+                    stats.system_peak.store(0.0f32.to_bits(), Ordering::Relaxed);
+                }
+                Ok(Ctl::Resume { at_ns }) => {
+                    if let Some(p) = paused_at.take() {
+                        paused_total_ns += at_ns.saturating_sub(p);
+                        last_resume_ns = at_ns;
+                        pause_windows.push((p, at_ns));
+                    }
+                }
                 Ok(Ctl::Stop { end_ns: e }) => { end_ns = Some(e); break; }
                 Err(_) => break,
             },
@@ -544,25 +595,45 @@ fn worker_loop(
     // Drain whatever the producers queued before they were stopped.
     while let Ok(ev) = cap_rx.try_recv() {
         match ev {
-            Event::Frame(f) => handle_frame(&mut cfr, &mut origin, f)?,
-            Event::SystemAudio(b) => {
-                if let Some(o) = origin {
-                    feed(&mut aligners, b, o)?;
+            Event::Frame(mut f) => {
+                if paused_at.is_none() && f.pts_ns >= last_resume_ns {
+                    f.pts_ns = f.pts_ns.saturating_sub(paused_total_ns);
+                    handle_frame(&mut cfr, &mut origin, f)?;
+                }
+            }
+            Event::SystemAudio(mut b) => {
+                if paused_at.is_none() && b.pts_ns >= last_resume_ns {
+                    b.pts_ns = b.pts_ns.saturating_sub(paused_total_ns);
+                    if let Some(o) = origin {
+                        feed(&mut aligners, b, o)?;
+                    }
                 }
             }
             Event::Ended(_) => {}
         }
     }
-    while let Ok(b) = audio_rx.try_recv() {
-        if let Some(o) = origin {
-            feed(&mut aligners, b, o)?;
+    while let Ok(mut b) = audio_rx.try_recv() {
+        if paused_at.is_none() && b.pts_ns >= last_resume_ns {
+            b.pts_ns = b.pts_ns.saturating_sub(paused_total_ns);
+            if let Some(o) = origin {
+                feed(&mut aligners, b, o)?;
+            }
         }
     }
 
     let Some(origin_ns) = origin else {
         return Err("no frames were captured".into());
     };
-    let end = end_ns.filter(|&e| e != u64::MAX).unwrap_or(origin_ns + (frames_sent * 1_000_000_000 / fps as u64));
+    let end = if let Some(p) = paused_at.take() {
+        let raw_end = end_ns.filter(|&e| e != u64::MAX).unwrap_or(p);
+        pause_windows.push((p, raw_end));
+        p.saturating_sub(paused_total_ns)
+    } else {
+        end_ns
+            .filter(|&e| e != u64::MAX)
+            .map(|e| e.saturating_sub(paused_total_ns))
+            .unwrap_or(origin_ns + (frames_sent * 1_000_000_000 / fps as u64))
+    };
     for (slot, frame) in cfr.finish(end) {
         let pts = cfr.slot_pts_us(slot);
         exporter.push_video(frame, pts).map_err(|e| e.to_string())?;
@@ -577,5 +648,86 @@ fn worker_loop(
         }
     }
     let duration_ms = cfr.slots() as f64 * 1000.0 / fps as f64;
-    Ok(WorkerResult { frames: frames_sent, duration_ms, origin_ns })
+    Ok(WorkerResult { frames: frames_sent, duration_ms, origin_ns, pause_windows })
+}
+
+fn remap_input_log(log: &mut InputLog, origin_ns: u64, pause_windows: &[(u64, u64)]) {
+    if pause_windows.is_empty() {
+        return;
+    }
+    let windows: Vec<(f64, f64)> = pause_windows
+        .iter()
+        .map(|&(s, e)| (s.saturating_sub(origin_ns) as f64 / 1e6, e.saturating_sub(origin_ns) as f64 / 1e6))
+        .collect();
+    let remap = |t: f64| -> Option<f64> {
+        let mut shift = 0.0;
+        for &(s, e) in &windows {
+            if t >= s && t < e {
+                return None;
+            }
+            if e <= t {
+                shift += e - s;
+            }
+        }
+        Some((t - shift).max(0.0))
+    };
+    log.moves.retain_mut(|ev| {
+        let Some(t) = remap(ev.t) else { return false };
+        ev.t = t;
+        true
+    });
+    log.clicks.retain_mut(|ev| {
+        let Some(t) = remap(ev.t) else { return false };
+        ev.t = t;
+        true
+    });
+    log.keys.retain_mut(|ev| {
+        let Some(t) = remap(ev.t) else { return false };
+        ev.t = t;
+        true
+    });
+    log.carets.retain_mut(|ev| {
+        let Some(t) = remap(ev.t) else { return false };
+        ev.t = t;
+        true
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use screencraft_core::input::{Button, CaretEvent, ClickEvent, CursorKind, KeyEvent, MoveEvent};
+
+    #[test]
+    fn remap_input_log_drops_paused_and_shifts_resumed() {
+        let mut log = InputLog {
+            bounds: Rect::default(),
+            moves: vec![
+                MoveEvent { t: 500.0, x: 1.0, y: 1.0, cursor: CursorKind::Arrow },
+                MoveEvent { t: 1500.0, x: 2.0, y: 2.0, cursor: CursorKind::Arrow },
+                MoveEvent { t: 2500.0, x: 3.0, y: 3.0, cursor: CursorKind::Arrow },
+            ],
+            clicks: vec![
+                ClickEvent { t: 1200.0, x: 2.0, y: 2.0, button: Button::Left, down: true },
+                ClickEvent { t: 2200.0, x: 3.0, y: 3.0, button: Button::Left, down: true },
+            ],
+            keys: vec![
+                KeyEvent { t: 1000.0, key: "0".into(), down: true, mods: 0, label: String::new() },
+                KeyEvent { t: 3100.0, key: "0".into(), down: true, mods: 0, label: String::new() },
+            ],
+            carets: vec![CaretEvent { t: 2000.0, x: 0.0, y: 0.0, w: 2.0, h: 10.0 }],
+        };
+        let origin_ns = 1_000_000_000;
+        let pause_windows = vec![(2_000_000_000, 3_000_000_000)];
+        remap_input_log(&mut log, origin_ns, &pause_windows);
+        assert_eq!(log.moves.len(), 2);
+        assert_eq!(log.moves[0].t, 500.0);
+        assert_eq!(log.moves[1].t, 1500.0);
+        assert_eq!(log.clicks.len(), 1);
+        assert_eq!(log.clicks[0].t, 1200.0);
+        assert_eq!(log.keys.len(), 1);
+        assert_eq!(log.keys[0].t, 2100.0);
+        assert_eq!(log.carets.len(), 1);
+        assert_eq!(log.carets[0].t, 1000.0);
+    }
 }

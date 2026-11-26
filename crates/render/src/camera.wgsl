@@ -62,7 +62,7 @@ fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     // drop shadow
     if (shadow > 0.01) {
         let ds = sd_round_rect(p - centre - vec2<f32>(0.0, 8.0 * s), rect.zw * 0.5, rad);
-        let sa = (1.0 - smoothstep(-28.0 * s, 28.0 * s, ds)) * 0.45 * shadow * (1.0 - clamp(0.5 - d, 0.0, 1.0));
+        let sa = (1.0 - smoothstep(-28.0 * s, 28.0 * s, ds)) * 0.9 * shadow * (1.0 - clamp(0.5 - d, 0.0, 1.0));
         out = vec4<f32>(0.0, 0.0, 0.0, sa);
     }
     let mask = clamp(0.5 - d, 0.0, 1.0);

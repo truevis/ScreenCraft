@@ -63,7 +63,7 @@ if ($sccache) {
 }
 $sw = [Diagnostics.Stopwatch]::StartNew()
 
-cargo build --profile $cargoProfile -p screencraft
+cargo build --profile $cargoProfile -p screencraft -p screencraft-mcp
 if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
 
 $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
@@ -79,10 +79,11 @@ if (-not $makensis) { throw "makensis not found - install NSIS first (winget ins
 
 if (-not $Out) { $Out = "screencraft_$($version -replace '\.', '_').exe" }
 $exe = (Resolve-Path "target\$cargoProfile\screencraft.exe").Path
+$mcpExe = (Resolve-Path "target\$cargoProfile\screencraft-mcp.exe").Path
 $ico = (Resolve-Path "assets\icons\icon.ico").Path
 $outPath = Join-Path (Get-Location) $Out
 
-& $makensis "/DVERSION=$version" "/DEXE_PATH=$exe" "/DICON_PATH=$ico" "/DOUT_FILE=$outPath" "scripts\installer.nsi"
+& $makensis "/DVERSION=$version" "/DEXE_PATH=$exe" "/DMCP_EXE_PATH=$mcpExe" "/DICON_PATH=$ico" "/DOUT_FILE=$outPath" "scripts\installer.nsi"
 if ($LASTEXITCODE -ne 0) { throw "makensis failed" }
 
 Write-Host ""
@@ -93,10 +94,13 @@ Write-Host "SHA-256: $((Get-FileHash $outPath -Algorithm SHA256).Hash)"
 
 $installDir = Join-Path $env:LOCALAPPDATA "Programs\ScreenCraft"
 $installExe = Join-Path $installDir "ScreenCraft.exe"
+$installMcp = Join-Path $installDir "screencraft-mcp.exe"
 try {
     New-Item -ItemType Directory -Path $installDir -Force | Out-Null
     Copy-Item -Path $exe -Destination $installExe -Force
+    Copy-Item -Path $mcpExe -Destination $installMcp -Force
     Write-Host "Copied $exe -> $installExe"
+    Write-Host "Copied $mcpExe -> $installMcp"
 } catch {
     Write-Warning "Could not copy to $installExe (is ScreenCraft.exe running?): $_"
 }

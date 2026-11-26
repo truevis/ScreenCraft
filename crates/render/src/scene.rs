@@ -418,7 +418,9 @@ mod tests {
 
     #[test]
     fn content_is_centred_and_padded() {
-        let p = project();
+        let mut p = project();
+        assert!(content_rect(&p, 1920.0, 1080.0)[1].abs() < 0.01);
+        p.config.styles.padding_ratio = 0.02;
         let r = content_rect(&p, 1920.0, 1080.0);
         let pad = 0.02 * 1080.0;
         assert!((r[1] - pad as f32).abs() < 0.01);
