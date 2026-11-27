@@ -263,3 +263,14 @@ unsafe fn plain_window(hwnd: windows::Win32::Foundation::HWND) {
 pub fn place_window_titled(_title: &str, _rect: (f64, f64, f64, f64)) -> bool {
     false
 }
+
+/// Capture a single RGBA8888 screenshot of `display_id` (or the primary display).
+#[cfg(windows)]
+pub fn snapshot_display(display_id: Option<u32>) -> Option<(u32, u32, Vec<u8>)> {
+    monitors::snapshot_display(display_id)
+}
+
+#[cfg(not(windows))]
+pub fn snapshot_display(_display_id: Option<u32>) -> Option<(u32, u32, Vec<u8>)> {
+    None
+}

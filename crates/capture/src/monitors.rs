@@ -175,3 +175,69 @@ pub fn windows() -> Vec<WindowEntry> {
         })
         .collect()
 }
+
+/// Capture a single RGBA8888 screenshot of `display_id` (or the primary display) using GDI.
+pub fn snapshot_display(display_id: Option<u32>) -> Option<(u32, u32, Vec<u8>)> {
+    use ::windows::Win32::Graphics::Gdi::{
+        BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, SRCCOPY,
+    };
+    let d = display(display_id)?;
+    let (x, y, w, h) = d.phys;
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+    let (wu, hu) = (w as u32, h as u32);
+    unsafe {
+        let hdc_screen = GetDC(None);
+        if hdc_screen.is_invalid() {
+            return None;
+        }
+        let hdc_mem = CreateCompatibleDC(Some(hdc_screen));
+        if hdc_mem.is_invalid() {
+            let _ = ReleaseDC(None, hdc_screen);
+            return None;
+        }
+        let hbmp = CreateCompatibleBitmap(hdc_screen, w, h);
+        if hbmp.is_invalid() {
+            let _ = DeleteDC(hdc_mem);
+            let _ = ReleaseDC(None, hdc_screen);
+            return None;
+        }
+        let old = SelectObject(hdc_mem, hbmp.into());
+        let ok = BitBlt(hdc_mem, 0, 0, w, h, Some(hdc_screen), x, y, SRCCOPY).is_ok();
+        let mut rgba = if ok {
+            let mut bmi = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: w,
+                    biHeight: -h,
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut buf = vec![0u8; (wu * hu * 4) as usize];
+            let lines = GetDIBits(hdc_mem, hbmp, 0, hu, Some(buf.as_mut_ptr() as *mut _), &mut bmi, DIB_RGB_COLORS);
+            if lines > 0 {
+                for px in buf.chunks_exact_mut(4) {
+                    px.swap(0, 2);
+                    px[3] = 255;
+                }
+                Some(buf)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if !old.is_invalid() {
+            let _ = SelectObject(hdc_mem, old);
+        }
+        let _ = DeleteObject(hbmp.into());
+        let _ = DeleteDC(hdc_mem);
+        let _ = ReleaseDC(None, hdc_screen);
+        rgba.take().map(|pixels| (wu, hu, pixels))
+    }
+}

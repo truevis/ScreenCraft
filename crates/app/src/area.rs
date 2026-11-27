@@ -18,11 +18,16 @@ pub struct Picker {
     drag: Option<(Pos2, Pos2)>,
     /// Width / height the drawn area must keep (9:16 for a vertical video).
     ratio: Option<f32>,
+    /// Pre-captured desktop screenshot so the picker uses an opaque window instead of a
+    /// full-screen transparent viewport (which renders as an opaque gray block on hybrid GPUs).
+    snapshot: Option<(u32, u32, Vec<u8>)>,
+    tex: Option<egui::TextureHandle>,
 }
 
 impl Picker {
     pub fn new(display: Option<DisplayInfo>, ratio: Option<f32>) -> Self {
-        Self { display, drag: None, ratio }
+        let snapshot = screencraft_capture::snapshot_display(display.as_ref().map(|d| d.id));
+        Self { display, drag: None, ratio, snapshot, tex: None }
     }
 
     pub fn display_id(&self) -> Option<u32> {
@@ -36,7 +41,6 @@ impl Picker {
             .with_position(Pos2::new(x, y))
             .with_inner_size([w, h])
             .with_decorations(false)
-            .with_transparent(true)
             .with_resizable(false)
             .with_has_shadow(false)
             .with_taskbar(false)
@@ -45,6 +49,8 @@ impl Picker {
         let mut origin = (x, y);
         let drag = &mut self.drag;
         let ratio = self.ratio;
+        let snapshot = &mut self.snapshot;
+        let tex = &mut self.tex;
         ctx.show_viewport_immediate(ViewportId::from_hash_of("area-picker"), builder, |ui, _| {
             let ctx = ui.ctx().clone();
             ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
@@ -53,9 +59,20 @@ impl Picker {
             if let Some(inner) = ctx.input(|i| i.viewport().inner_rect) {
                 origin = (inner.min.x, inner.min.y);
             }
+            if tex.is_none() {
+                if let Some((sw, sh, rgba)) = snapshot.take() {
+                    let img = egui::ColorImage::from_rgba_unmultiplied([sw as usize, sh as usize], &rgba);
+                    *tex = Some(ctx.load_texture("area-picker-bg", img, egui::TextureOptions::LINEAR));
+                }
+            }
             egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
                 let resp = ui.allocate_rect(full, egui::Sense::click_and_drag());
                 let painter = ui.painter();
+                if let Some(t) = tex.as_ref() {
+                    painter.image(t.id(), full, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+                } else {
+                    painter.rect_filled(full, 0.0, Color32::from_rgb(20, 22, 26));
+                }
                 if resp.drag_started() {
                     if let Some(p) = resp.interact_pointer_pos() {
                         *drag = Some((p, p));
@@ -134,20 +151,16 @@ impl Picker {
     }
 }
 
-/// The recording outline as small opaque windows (four edges and the REC tag) instead of one
-/// full-screen transparent window. On hybrid Intel + NVIDIA laptops the transparent window was
-/// drawn as a white or black block over the screen being recorded.
-fn draw_rec_frame(ctx: &egui::Context, rect: PRect) {
-    // A hairline on the very edges of what is being recorded: 1 point (2 px at 200% scaling) of
-    // muted red. The bar's timer already says a recording is running, so there is no tag.
-    const T: f32 = 1.0;
-    const COLOR: Color32 = Color32::from_rgb(214, 64, 76);
+/// An outline as four small opaque click-through edge windows instead of one full-screen
+/// transparent window. On hybrid Intel + NVIDIA laptops a full-screen transparent window is
+/// drawn as a white, black, or gray block over the screen.
+fn draw_edge_frame(ctx: &egui::Context, rect: PRect, thickness: f32, color: Color32, prefix: &str) {
     let (x, y, w, h) = (rect.x as f32, rect.y as f32, rect.width as f32, rect.height as f32);
     let edges = [
-        ("rec-top", Pos2::new(x, y), Vec2::new(w, T)),
-        ("rec-bottom", Pos2::new(x, y + h - T), Vec2::new(w, T)),
-        ("rec-left", Pos2::new(x, y + T), Vec2::new(T, (h - 2.0 * T).max(1.0))),
-        ("rec-right", Pos2::new(x + w - T, y + T), Vec2::new(T, (h - 2.0 * T).max(1.0))),
+        (format!("{prefix}-top"), Pos2::new(x, y), Vec2::new(w, thickness)),
+        (format!("{prefix}-bottom"), Pos2::new(x, y + h - thickness), Vec2::new(w, thickness)),
+        (format!("{prefix}-left"), Pos2::new(x, y + thickness), Vec2::new(thickness, (h - 2.0 * thickness).max(1.0))),
+        (format!("{prefix}-right"), Pos2::new(x + w - thickness, y + thickness), Vec2::new(thickness, (h - 2.0 * thickness).max(1.0))),
     ];
     let bar = |title: &str, pos: Pos2, size: Vec2| {
         ViewportBuilder::default()
@@ -162,14 +175,14 @@ fn draw_rec_frame(ctx: &egui::Context, rect: PRect) {
             .with_mouse_passthrough(true)
             .with_always_on_top()
     };
-    for (id, pos, size) in edges {
-        ctx.show_viewport_immediate(ViewportId::from_hash_of(id), bar(id, pos, size), |ui, _| {
-            ui.painter().rect_filled(ui.max_rect().expand(2.0), 0.0, COLOR);
+    for (id, pos, size) in &edges {
+        ctx.show_viewport_immediate(ViewportId::from_hash_of(id), bar(id, *pos, *size), |ui, _| {
+            ui.painter().rect_filled(ui.max_rect().expand(2.0), 0.0, color);
         });
     }
     // Pin each edge to the display's exact physical pixels (logical window positions are off by
     // a pixel or more at 200% scaling and across monitors with different scaling).
-    for (id, pos, size) in edges {
+    for (id, pos, size) in &edges {
         screencraft_capture::place_window_titled(id, (pos.x as f64, pos.y as f64, size.x as f64, size.y as f64));
         // keep the border out of the recording (desktop duplication sees every window)
         screencraft_capture::exclude_window_titled(id);
@@ -185,65 +198,10 @@ pub enum FrameStyle {
 }
 
 /// The click-through outline around `rect` (global logical points).
-pub fn draw_frame(ctx: &egui::Context, rect: PRect, style: FrameStyle, displays: &[DisplayInfo]) {
-    if style == FrameStyle::Rec {
-        return draw_rec_frame(ctx, rect);
+pub fn draw_frame(ctx: &egui::Context, rect: PRect, style: FrameStyle, _displays: &[DisplayInfo]) {
+    match style {
+        FrameStyle::Rec => draw_edge_frame(ctx, rect, 1.0, Color32::from_rgb(214, 64, 76), "rec"),
+        FrameStyle::Selection => draw_edge_frame(ctx, rect, 2.0, ACCENT_2, "sel"),
+        FrameStyle::Highlight => draw_edge_frame(ctx, rect, 3.0, ACCENT_2, "hl"),
     }
-    let d = displays
-        .iter()
-        .find(|d| rect.x + rect.width / 2.0 >= d.x && rect.x + rect.width / 2.0 < d.x + d.width && rect.y + rect.height / 2.0 >= d.y && rect.y + rect.height / 2.0 < d.y + d.height)
-        .or(displays.first());
-    let (dx, dy, dw, dh) = d.map(|d| (d.x as f32, d.y as f32, d.width as f32, d.height as f32)).unwrap_or((0.0, 0.0, 1440.0, 900.0));
-    let builder = ViewportBuilder::default()
-        .with_title("frame")
-        .with_position(Pos2::new(dx, dy))
-        .with_inner_size([dw, dh])
-        .with_decorations(false)
-        .with_transparent(true)
-        .with_resizable(false)
-        .with_has_shadow(false)
-        .with_taskbar(false)
-        .with_mouse_passthrough(true)
-        .with_always_on_top();
-    ctx.show_viewport_immediate(ViewportId::from_hash_of(("frame", style)), builder, |ui, _| {
-        let full = ui.max_rect();
-        let (dx, dy) = ui.input(|i| i.viewport().inner_rect).map(|r| (r.min.x, r.min.y)).unwrap_or((dx, dy));
-        let hole = Rect::from_min_size(Pos2::new(rect.x as f32 - dx, rect.y as f32 - dy), Vec2::new(rect.width as f32, rect.height as f32));
-        let p = ui.painter();
-        let dim = match style {
-            FrameStyle::Highlight => Color32::TRANSPARENT,
-            FrameStyle::Rec => Color32::from_black_alpha(46),
-            FrameStyle::Selection => Color32::from_black_alpha(77),
-        };
-        for r in [
-            Rect::from_min_max(full.min, Pos2::new(full.max.x, hole.min.y)),
-            Rect::from_min_max(Pos2::new(full.min.x, hole.max.y), full.max),
-            Rect::from_min_max(Pos2::new(full.min.x, hole.min.y), Pos2::new(hole.min.x, hole.max.y)),
-            Rect::from_min_max(Pos2::new(hole.max.x, hole.min.y), Pos2::new(full.max.x, hole.max.y)),
-        ] {
-            p.rect_filled(r, 0.0, dim);
-        }
-        match style {
-            FrameStyle::Highlight => {
-                p.rect_filled(hole, CornerRadius::same(6), Color32::from_rgba_unmultiplied(106, 174, 232, 36));
-                p.rect_stroke(hole, CornerRadius::same(6), Stroke::new(3.0, ACCENT_2), StrokeKind::Inside);
-            }
-            FrameStyle::Rec => {
-                let t = ui.input(|i| i.time);
-                let a = 0.55 + 0.45 * (0.5 + 0.5 * (t * std::f64::consts::TAU / 1.6).cos()) as f32;
-                p.rect_stroke(hole, CornerRadius::same(3), Stroke::new(2.0, alpha(DANGER, a)), StrokeKind::Inside);
-                let tag = Rect::from_min_size(Pos2::new(hole.min.x, (hole.min.y - 28.0).max(4.0)), Vec2::new(52.0, 22.0));
-                p.rect_filled(tag, CornerRadius::same(6), DANGER);
-                p.circle_filled(Pos2::new(tag.min.x + 12.0, tag.center().y), 3.5, Color32::WHITE);
-                p.text(Pos2::new(tag.min.x + 22.0, tag.center().y), Align2::LEFT_CENTER, "REC", kit::font(11.0), Color32::WHITE);
-                ui.ctx().request_repaint_after(std::time::Duration::from_millis(60));
-            }
-            FrameStyle::Selection => {
-                let corners = [hole.left_top(), hole.right_top(), hole.right_bottom(), hole.left_bottom(), hole.left_top()];
-                for w in corners.windows(2) {
-                    p.extend(egui::Shape::dashed_line(&[w[0], w[1]], Stroke::new(2.0, ACCENT_2), 6.0, 4.0));
-                }
-            }
-        }
-    });
 }

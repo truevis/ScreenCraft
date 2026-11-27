@@ -232,12 +232,18 @@ pub fn start(id: Option<&str>, preset: CamPreset, mut on_frame: impl FnMut(CamFr
                 return;
             }
             let _ = ready_tx.send(Ok(()));
+            let mut logged_decode_err = false;
             while !stop2.load(Ordering::SeqCst) {
                 match cam.frame() {
                     Ok(buf) => {
                         let at = Instant::now();
-                        if let Ok(img) = buf.decode_image::<RgbFormat>() {
-                            on_frame(CamFrame { width: img.width(), height: img.height(), rgb: img.into_raw(), at });
+                        match buf.decode_image::<RgbFormat>() {
+                            Ok(img) => on_frame(CamFrame { width: img.width(), height: img.height(), rgb: img.into_raw(), at }),
+                            Err(e) if !logged_decode_err => {
+                                logged_decode_err = true;
+                                eprintln!("screencraft-camera: frame decode failed ({:?}): {e}", buf.source_frame_format());
+                            }
+                            Err(_) => {}
                         }
                     }
                     Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),
