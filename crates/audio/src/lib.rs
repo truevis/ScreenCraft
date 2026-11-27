@@ -6,7 +6,9 @@ pub mod align;
 pub mod capture;
 pub mod clock;
 pub mod decode;
+pub mod denoise;
 pub mod devices;
+pub mod loudness;
 pub mod mix;
 
 pub use align::{AlignStats, StreamAligner, OUT_CHANNELS, OUT_RATE};

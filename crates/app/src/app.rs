@@ -57,6 +57,8 @@ pub struct App {
     /// Floating camera viewfinder dismissed by user until re-selecting Camera mode.
     cam_preview_hidden: bool,
     cam_preview_anchor: Option<Pos2>,
+    /// Last applied geometry for the recorder bar's floating menu viewport.
+    applied_menu_rect: Option<(u64, Pos2, Vec2)>,
 }
 
 #[derive(Clone)]
@@ -256,6 +258,7 @@ impl App {
             pending_select_slice: None,
             cam_preview_hidden: false,
             cam_preview_anchor: None,
+            applied_menu_rect: None,
             fresh: Vec::new(),
             quit: false,
             quit_pending: false,
@@ -685,7 +688,7 @@ impl App {
             self.applied = None;
         }
         let want = self.rec.window_size(screen_w, camera);
-        let key = (want, self.rec.phase, self.rec.menu.is_some());
+        let key = (want, self.rec.phase, false);
         if self.applied == Some(key) {
             return;
         }
@@ -862,6 +865,125 @@ impl App {
             self.rec.probe_cameras();
         }
     }
+
+    /// Floating opaque drop-up/drop-down menu for the recorder bar so the transparent bar window
+    /// never expands vertically (on hybrid-GPU Windows laptops, resizing transparent swapchains
+    /// exposes an opaque black/white rectangle).
+    fn draw_bar_menu(&mut self, ctx: &egui::Context, bar_ui: &egui::Ui) {
+        if !self.editors.is_empty() || self.rec.phase != Phase::Idle || self.rec.menu.is_none() {
+            self.applied_menu_rect = None;
+            return;
+        }
+        self.rec.refresh_menu(&self.prefs);
+        let bar_outer = ctx.input(|i| i.viewport().outer_rect).unwrap_or_else(|| {
+            let w = self.rec.bar_width();
+            egui::Rect::from_min_size(self.home_pos(ctx, Vec2::new(w, BAR_H)), Vec2::new(w, BAR_H))
+        });
+        let disp = self
+            .rec
+            .displays()
+            .iter()
+            .map(|d| egui::Rect::from_min_size(Pos2::new(d.x as f32, d.y as f32), Vec2::new(d.width as f32, d.height as f32)))
+            .find(|r| r.contains(bar_outer.center()))
+            .unwrap_or_else(|| self.home_display(ctx));
+        let max_h = (disp.height() - BAR_H - 48.0).clamp(160.0, 380.0);
+        let Some(size) = self.rec.menu_size(bar_ui, max_h) else {
+            self.applied_menu_rect = None;
+            return;
+        };
+        let (menu_gen, kind, menu_left, items) = {
+            let m = self.rec.menu.as_ref().unwrap();
+            (m.gen, m.kind, m.left, m.items.clone())
+        };
+        let px = (bar_outer.min.x + menu_left)
+            .clamp(bar_outer.min.x, (bar_outer.max.x - size.x).max(bar_outer.min.x))
+            .clamp(disp.min.x + 8.0, (disp.max.x - size.x - 8.0).max(disp.min.x + 8.0));
+        let above_y = bar_outer.min.y - 8.0 - size.y;
+        let py = if above_y >= disp.min.y + 8.0 {
+            above_y
+        } else {
+            (bar_outer.max.y + 8.0).min((disp.max.y - size.y - 8.0).max(disp.min.y + 8.0))
+        };
+        let pos = Pos2::new(px.round(), py.round());
+
+        let builder = ViewportBuilder::default()
+            .with_title("sc-bar-menu")
+            .with_position(pos)
+            .with_inner_size(size)
+            .with_decorations(false)
+            .with_resizable(false)
+            .with_has_shadow(true)
+            .with_taskbar(false)
+            .with_always_on_top();
+        let prev_rect = self.applied_menu_rect;
+        let mut picked = None;
+        let mut hover_win = None;
+        let mut menu_focused = false;
+        let mut esc = false;
+        let mut close_req = false;
+
+        ctx.show_viewport_immediate(ViewportId::from_hash_of(("sc-bar-menu", menu_gen)), builder, |ui, _| {
+            if prev_rect.is_some_and(|(g, p, s)| g == menu_gen && (p != pos || s != size)) {
+                ui.ctx().send_viewport_cmd(ViewportCommand::InnerSize(size));
+                ui.ctx().send_viewport_cmd(ViewportCommand::OuterPosition(pos));
+            }
+            menu_focused = ui.ctx().input(|i| i.viewport().focused).unwrap_or(false);
+            esc = ui.ctx().input(|i| i.key_pressed(egui::Key::Escape));
+            close_req = ui.ctx().input(|i| i.viewport().close_requested());
+            egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
+                let full = ui.max_rect();
+                ui.painter().rect_filled(full.expand(2.0), egui::CornerRadius::ZERO, Color32::from_rgb(13, 19, 30));
+                ui.painter().rect_stroke(
+                    full,
+                    egui::CornerRadius::ZERO,
+                    egui::Stroke::new(1.0, crate::theme::LINE_2),
+                    egui::StrokeKind::Inside,
+                );
+                let (p, hw) = Recorder::paint_menu_items(ui, full.shrink(6.0), &items);
+                picked = p;
+                hover_win = hw;
+            });
+        });
+
+        screencraft_capture::exclude_window_titled("sc-bar-menu");
+        self.applied_menu_rect = Some((menu_gen, pos, size));
+
+        if let Some(a) = picked {
+            self.rec.close_menu();
+            self.applied_menu_rect = None;
+            let act = self.rec.apply(a, &mut self.prefs);
+            let act = if matches!(act, Action::None) { Action::HoverWindow(None) } else { act };
+            self.handle_action(ctx, act);
+        } else if esc || close_req {
+            self.rec.close_menu();
+            self.applied_menu_rect = None;
+            self.handle_action(ctx, Action::HoverWindow(None));
+        } else {
+            let bar_focused = ctx.input(|i| i.viewport().focused).unwrap_or(false);
+            let mut should_close = false;
+            if let Some(m) = self.rec.menu.as_mut() {
+                if bar_focused || menu_focused {
+                    m.seen_focus = true;
+                    m.lost_focus_at = None;
+                } else if m.seen_focus {
+                    let since = *m.lost_focus_at.get_or_insert_with(Instant::now);
+                    if since.elapsed() >= Duration::from_millis(120) {
+                        should_close = true;
+                    } else {
+                        ctx.request_repaint_after(Duration::from_millis(40));
+                    }
+                }
+            }
+            if should_close {
+                self.rec.close_menu();
+                self.applied_menu_rect = None;
+                self.handle_action(ctx, Action::HoverWindow(None));
+            } else if kind == crate::recorder::MenuKind::Windows {
+                let w = hover_win.and_then(|id| self.rec.windows().iter().find(|w| w.id == id).cloned());
+                self.handle_action(ctx, Action::HoverWindow(w));
+            }
+        }
+    }
 }
 
 impl eframe::App for App {
@@ -940,15 +1062,16 @@ impl App {
             let menu_h = if self.rec.menu.is_some() { 360.0 } else { 0.0 };
             let bar_area = egui::Rect::from_min_size(Pos2::new(rect.center().x - w / 2.0, rect.max.y - 90.0 - BAR_H - menu_h), Vec2::new(w, BAR_H + menu_h));
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(bar_area));
-            let a = self.rec.show(&mut child, &mut self.prefs);
+            let a = self.rec.show(&mut child, &mut self.prefs, true);
             self.handle_action(&ctx, a);
             return;
         }
 
         self.place_bar(&ctx);
         self.remember_bar(&ctx);
-        let a = egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.rec.show(ui, &mut self.prefs)).inner;
+        let a = egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.rec.show(ui, &mut self.prefs, false)).inner;
         self.handle_action(&ctx, a);
+        self.draw_bar_menu(&ctx, ui);
 
         if ctx.input(|i| (i.modifiers.alt && i.key_pressed(egui::Key::F4)) || i.viewport().close_requested()) {
             if self.editors.iter().any(|e| e.ed.dirty) {

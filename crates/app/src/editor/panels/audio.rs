@@ -1,8 +1,69 @@
 use super::*;
 use crate::editor::Sel;
+use screencraft_audio::loudness::{gain_db, BROADCAST_LUFS, PODCAST_LUFS, YOUTUBE_LUFS};
+use screencraft_engine::LoudnessReport;
+use std::sync::mpsc::Receiver;
+use std::time::{Duration, Instant};
 
 const CLICK_STYLES: [(&str, &str); 3] = [("soft", "Soft"), ("crisp", "Crisp"), ("classic", "Classic")];
 const KEY_STYLES: [(&str, &str); 3] = [("mechanical", "Mechanical"), ("soft", "Soft"), ("thock", "Thock")];
+
+pub struct AudioPanelState {
+    pub busy: bool,
+    pub in_flight_key: Option<u64>,
+    pub current_key: Option<u64>,
+    pub pending_key: Option<(u64, Instant)>,
+    pub last_report: Option<(u64, LoudnessReport)>,
+    pub last_checked_rev: u64,
+    pub just_finished: bool,
+    pub error: Option<String>,
+    pub rx: Option<Receiver<(u64, Result<LoudnessReport, String>)>>,
+}
+
+impl Default for AudioPanelState {
+    fn default() -> Self {
+        Self {
+            busy: false,
+            in_flight_key: None,
+            current_key: None,
+            pending_key: None,
+            last_report: None,
+            last_checked_rev: u64::MAX,
+            just_finished: false,
+            error: None,
+            rx: None,
+        }
+    }
+}
+
+impl AudioPanelState {
+    pub fn poll(&mut self, ctx: &egui::Context) {
+        let mut finished = false;
+        if let Some(rx) = &self.rx {
+            while let Ok((key, res)) = rx.try_recv() {
+                finished = true;
+                match res {
+                    Ok(rep) => {
+                        self.last_report = Some((key, rep));
+                        self.error = None;
+                    }
+                    Err(e) => {
+                        self.error = Some(e);
+                    }
+                }
+            }
+            if self.busy {
+                ctx.request_repaint_after(Duration::from_millis(80));
+            }
+        }
+        if finished {
+            self.busy = false;
+            self.in_flight_key = None;
+            self.rx = None;
+            self.just_finished = true;
+        }
+    }
+}
 
 pub fn show(st: &mut EditorState, ui: &mut Ui) {
     let a = st.project.config.audio.clone();
@@ -11,14 +72,132 @@ pub fn show(st: &mut EditorState, ui: &mut Ui) {
     if m.mic.is_none() && !m.has_microphone && !m.has_system_audio {
         note(ui, "No audio was recorded. Enable the microphone or system audio in the recorder toolbar.");
     }
-    slider(st, ui, "a-master", "Master volume", a.volume, (0.0, 1.0, 0.01), pct, |p, v| p.config.audio.volume = v);
+    ui.add_enabled_ui(!a.loudness_enabled, |ui| {
+        slider(st, ui, "a-master", "Master volume", a.volume, (0.0, 1.0, 0.01), pct, |p, v| p.config.audio.volume = v);
+    });
+    if a.loudness_enabled {
+        kit::hint(ui, "Master level is controlled automatically by Loudness target.");
+    }
     slider(st, ui, "a-mic", "Microphone", a.mic_volume, (0.0, 1.0, 0.01), pct, |p, v| p.config.audio.mic_volume = v);
     if m.mic.is_none() && m.mic_track.is_none() {
         kit::hint(ui, "This recording has no separate microphone track (it was recorded before microphones were split out), so the Device slider controls everything.");
     }
     slider(st, ui, "a-dev", "Device audio", a.device_volume, (0.0, 1.0, 0.01), pct, |p, v| p.config.audio.device_volume = v);
 
-    kit::h3(ui, "Sound effects", false);
+    kit::h3_help(
+        ui,
+        "Noise reduction",
+        false,
+        "Attenuates steady background noise such as cooling fans, hum, and room hiss using an 80 Hz rumble filter and spectral suppression. Applied non-destructively during preview playback and export.",
+    );
+    toggle(
+        st,
+        ui,
+        "Reduce background noise",
+        Some("Cuts steady fan noise, hum, and room hiss."),
+        a.noise_reduction,
+        |p, v| p.config.audio.noise_reduction = v,
+    );
+    if a.noise_reduction {
+        slider_def(
+            st,
+            ui,
+            "a-nr-strength",
+            "Strength",
+            a.noise_reduction_strength,
+            (0.0, 1.0, 0.05),
+            0.65,
+            pct,
+            |p, v| p.config.audio.noise_reduction_strength = v,
+        );
+        if m.mic.is_none() && m.mic_track.is_none() && m.has_system_audio {
+            kit::hint(ui, "Applied to device audio (this recording has no separate microphone track).");
+        }
+    }
+
+    kit::h3_help(
+        ui,
+        "Loudness target",
+        false,
+        "Measures integrated loudness (ITU-R BS.1770-4 LUFS) across your edited mix and brings it to your target with a -1.0 dBTP true-peak ceiling limiter. Applied non-destructively during preview playback (once analysis completes) and export.",
+    );
+    toggle(
+        st,
+        ui,
+        "Match loudness target",
+        Some("Normalizes the mix to the right level for YouTube (-14 LUFS) without clipping."),
+        a.loudness_enabled,
+        |p, v| p.config.audio.loudness_enabled = v,
+    );
+    if a.loudness_enabled {
+        let preset_cur = if (a.loudness_lufs - YOUTUBE_LUFS).abs() <= 0.25 {
+            "youtube".to_string()
+        } else if (a.loudness_lufs - PODCAST_LUFS).abs() <= 0.25 {
+            "podcast".to_string()
+        } else if (a.loudness_lufs - BROADCAST_LUFS).abs() <= 0.25 {
+            "broadcast".to_string()
+        } else {
+            "custom".to_string()
+        };
+        let presets = [
+            ("youtube".to_string(), "YouTube"),
+            ("podcast".to_string(), "Podcast"),
+            ("broadcast".to_string(), "Broadcast"),
+        ];
+        seg(st, ui, Some("Preset"), &presets, preset_cur, |p, v| {
+            p.config.audio.loudness_lufs = match v.as_str() {
+                "podcast" => PODCAST_LUFS,
+                "broadcast" => BROADCAST_LUFS,
+                _ => YOUTUBE_LUFS,
+            };
+        });
+        slider_def(
+            st,
+            ui,
+            "a-lufs-target",
+            "Target loudness",
+            a.loudness_lufs,
+            (-24.0, -8.0, 0.5),
+            YOUTUBE_LUFS,
+            |v| format!("{v:.1} LUFS"),
+            |p, v| p.config.audio.loudness_lufs = v,
+        );
+
+        let status = if a.volume <= 0.0 {
+            "Master volume is muted (0%).".to_string()
+        } else if st.panel.audio.busy {
+            "Analyzing soundtrack loudness…".to_string()
+        } else if let Some(err) = &st.panel.audio.error {
+            format!("Loudness analysis failed: {err}")
+        } else if let (Some(cur_key), Some((rep_key, rep))) = (st.panel.audio.current_key, st.panel.audio.last_report) {
+            if cur_key == rep_key && st.panel.audio.last_checked_rev == st.project_rev {
+                if let Some(lufs) = rep.integrated_lufs {
+                    let delta = gain_db(lufs, a.loudness_lufs);
+                    let sign = if delta >= 0.0 { "+" } else { "" };
+                    format!(
+                        "Mix: {lufs:.1} LUFS → {:.1} LUFS ({sign}{delta:.1} dB) · -1.0 dBTP ceiling",
+                        a.loudness_lufs
+                    )
+                } else {
+                    "No audible audio found to normalize.".to_string()
+                }
+            } else {
+                ui.ctx().request_repaint();
+                "Waiting to analyze loudness…".to_string()
+            }
+        } else {
+            ui.ctx().request_repaint();
+            "Waiting to analyze loudness…".to_string()
+        };
+        kit::hint(ui, &status);
+    }
+
+    kit::h3_help(
+        ui,
+        "Sound effects",
+        false,
+        "Adds synthesized click and typing sounds at each logged input event. Mixed non-destructively live during preview playback and on export.",
+    );
     toggle(st, ui, "Mouse click sounds", Some("Plays a click at every click in the recording."), a.click_sounds, |p, v| p.config.audio.click_sounds = v);
     if a.click_sounds {
         let opts: Vec<(String, &str)> = CLICK_STYLES.iter().map(|(a, b)| (a.to_string(), *b)).collect();

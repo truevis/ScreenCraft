@@ -692,6 +692,14 @@ pub struct AudioConfig {
     pub duck_music: bool,
     /// Music level while ducked, 0..1 of the normal level.
     pub duck_level: f64,
+    /// Reduce steady background noise (fan noise, hum, room hiss).
+    pub noise_reduction: bool,
+    /// Noise reduction amount (0..1).
+    pub noise_reduction_strength: f64,
+    /// Normalize soundtrack loudness to a target LUFS (e.g., -14 LUFS for YouTube).
+    pub loudness_enabled: bool,
+    /// Target integrated loudness in LUFS (YouTube: -14, Podcast: -16, Broadcast: -23).
+    pub loudness_lufs: f64,
 }
 
 impl Default for AudioConfig {
@@ -711,6 +719,10 @@ impl Default for AudioConfig {
             key_volume: 0.5,
             duck_music: true,
             duck_level: 0.3,
+            noise_reduction: false,
+            noise_reduction_strength: 0.65,
+            loudness_enabled: false,
+            loudness_lufs: -14.0,
         }
     }
 }
@@ -871,5 +883,27 @@ mod tests {
         let s: Subtitle = serde_json::from_str(r#"{"id":"s1","sourceStartMs":0,"sourceEndMs":500,"text":"hello"}"#).unwrap();
         assert!(s.word_ends.is_empty());
         assert!(s.word_starts.is_empty());
+    }
+
+    #[test]
+    fn legacy_audio_config_uses_defaults_and_roundtrips() {
+        let legacy: AudioConfig = serde_json::from_str(r#"{"volume":0.8,"micVolume":0.9}"#).unwrap();
+        assert_eq!(legacy.volume, 0.8);
+        assert_eq!(legacy.mic_volume, 0.9);
+        assert!(!legacy.noise_reduction);
+        assert_eq!(legacy.noise_reduction_strength, 0.65);
+        assert!(!legacy.loudness_enabled);
+        assert_eq!(legacy.loudness_lufs, -14.0);
+
+        let custom = AudioConfig {
+            noise_reduction: true,
+            noise_reduction_strength: 0.8,
+            loudness_enabled: true,
+            loudness_lufs: -16.0,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&custom).unwrap();
+        let back: AudioConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(custom, back);
     }
 }

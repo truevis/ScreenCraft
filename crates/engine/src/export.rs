@@ -1,8 +1,11 @@
 //! Render a project to a video file: decode -> compose on the GPU -> encode.
 
-use crate::audio_mix::{Lane, Soundtrack};
+use crate::audio_mix::{DenoisedSource, Lane, SegmentedNoiseProfile, Soundtrack};
 use crate::package::Package;
 use crate::source::AudioSource;
+use screencraft_audio::loudness::{
+    makeup_gain, LoudnessMeter, MAX_BOOST_DB, MAX_CUT_DB, TRUE_PEAK_CEILING_DBTP,
+};
 use screencraft_core::project::Project;
 use screencraft_core::track::compute_track;
 use screencraft_encode::color::{default_threads, to_i420, PixelOrder};
@@ -12,6 +15,8 @@ use screencraft_encode::{
     VideoConfig,
 };
 use screencraft_render::{build_scene_in, output_size, CamOverride, Compositor, ReadbackTicket, Slot};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::mpsc::sync_channel;
 use std::sync::Arc;
@@ -234,24 +239,285 @@ pub fn mic_speech(package: &Package, project: &Project) -> Option<Vec<[f64; 2]>>
     Some(info.speech.iter().map(|r| [r[0] - project.media.mic_offset_ms, r[1] - project.media.mic_offset_ms]).collect())
 }
 
-/// The edited soundtrack of a project: every audio track of `screen.mp4` through the cuts,
-/// speeds and volumes, plus music (fades, ducking under speech) and the click / typing effects.
-/// `None` when nothing audible is in the project.
-pub fn build_soundtrack(package: &Package, project: &Project, track: &screencraft_core::track::RenderTrack) -> Result<Option<Soundtrack>, String> {
+/// Integrated loudness and true-peak measurement of the pre-loudness edited soundtrack.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LoudnessReport {
+    pub integrated_lufs: Option<f64>,
+    pub true_peak_dbtp: f64,
+}
+
+fn file_stamp(path: &Path) -> (u64, u64) {
+    let Ok(m) = std::fs::metadata(path) else { return (0, 0) };
+    let size = m.len();
+    let mtime = m
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    (size, mtime)
+}
+
+fn hash_f64(h: &mut DefaultHasher, v: f64) {
+    let norm = if v == 0.0 { 0.0f64 } else { v };
+    norm.to_bits().hash(h);
+}
+
+fn noise_profile_cache(
+) -> &'static std::sync::Mutex<std::collections::HashMap<(std::path::PathBuf, usize, u64, u64), Arc<Vec<f32>>>> {
+    static C: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<(std::path::PathBuf, usize, u64, u64), Arc<Vec<f32>>>>,
+    > = std::sync::OnceLock::new();
+    C.get_or_init(Default::default)
+}
+
+fn estimate_track_noise_profile(path: &Path, track: usize) -> Option<Arc<Vec<f32>>> {
+    let (size, mtime) = file_stamp(path);
+    let key = (path.to_path_buf(), track, size, mtime);
+    if let Some(cached) = noise_profile_cache().lock().unwrap().get(&key) {
+        return Some(cached.clone());
+    }
+    let file = Arc::new(Mp4File::open(path).ok()?);
+    let mut src = AudioSource::open(file, track).ok()?;
+    let total_ms = src.duration_ms.max(0.0);
+    let mut est = screencraft_audio::denoise::NoiseProfileEstimator::new();
+    let mut mono = Vec::with_capacity(48_000);
+    let push_chunk = |pcm: &[f32], mono: &mut Vec<f32>, est: &mut screencraft_audio::denoise::NoiseProfileEstimator| {
+        mono.clear();
+        for f in pcm.chunks_exact(2) {
+            mono.push((f[0] + f[1]) * 0.5);
+        }
+        est.push_mono(mono);
+    };
+    if total_ms <= 60_000.0 {
+        let mut t = 0.0;
+        while t < total_ms {
+            if let Ok(pcm) = src.read(t, 48_000) {
+                push_chunk(&pcm, &mut mono, &mut est);
+            }
+            t += 1000.0;
+        }
+    } else {
+        let span = (total_ms - 1000.0).max(0.0);
+        for k in 0..60 {
+            let t = k as f64 * span / 59.0;
+            if let Ok(pcm) = src.read(t, 48_000) {
+                push_chunk(&pcm, &mut mono, &mut est);
+            }
+        }
+    }
+    let psd = Arc::new(est.finish().psd);
+    noise_profile_cache().lock().unwrap().insert(key, psd.clone());
+    Some(psd)
+}
+
+fn estimate_pcm_noise_profile(path: &Path, pcm: &[f32]) -> Arc<Vec<f32>> {
+    let (size, mtime) = file_stamp(path);
+    let key = (path.to_path_buf(), usize::MAX, size, mtime);
+    if let Some(cached) = noise_profile_cache().lock().unwrap().get(&key) {
+        return cached.clone();
+    }
+    let total_frames = pcm.len() / 2;
+    let mut est = screencraft_audio::denoise::NoiseProfileEstimator::new();
+    let mut mono = Vec::with_capacity(48_000);
+    if total_frames <= 60 * 48_000 {
+        mono.extend(pcm.chunks_exact(2).map(|f| (f[0] + f[1]) * 0.5));
+        est.push_mono(&mono);
+    } else {
+        let max_start = total_frames - 48_000;
+        for k in 0..60 {
+            let start = k * max_start / 59;
+            mono.clear();
+            for f in pcm[start * 2..(start + 48_000) * 2].chunks_exact(2) {
+                mono.push((f[0] + f[1]) * 0.5);
+            }
+            est.push_mono(&mono);
+        }
+    }
+    let psd = Arc::new(est.finish().psd);
+    noise_profile_cache().lock().unwrap().insert(key, psd.clone());
+    psd
+}
+
+fn project_noise_profile(package: &Package, project: &Project, mic: bool) -> SegmentedNoiseProfile {
+    let mut segments = Vec::new();
+    for seg in project.media.resolved_segments() {
+        let track_opt = if mic { seg.mic_track } else { seg.system_track };
+        if let Some(t) = track_opt {
+            let path = package.dir.join(&seg.screen);
+            if let Some(psd) = estimate_track_noise_profile(&path, t as usize) {
+                segments.push((seg.offset_ms, seg.offset_ms + seg.duration_ms, psd));
+            }
+        }
+    }
+    SegmentedNoiseProfile { segments }
+}
+
+fn loudness_cache() -> &'static std::sync::Mutex<std::collections::HashMap<u64, LoudnessReport>> {
+    static C: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<u64, LoudnessReport>>> = std::sync::OnceLock::new();
+    C.get_or_init(Default::default)
+}
+
+/// Content hash of everything affecting the pre-loudness edited soundtrack (media files, slices,
+/// music, SFX, mix volumes, noise reduction), intentionally excluding `loudness_enabled` and
+/// `loudness_lufs` so target changes reuse cached measurements immediately.
+pub fn audio_mix_fingerprint(package: &Package, project: &Project, track: &screencraft_core::track::RenderTrack) -> u64 {
+    let mut h = DefaultHasher::new();
+    package.dir.hash(&mut h);
+    let m = &project.media;
+    m.screen.hash(&mut h);
+    file_stamp(&package.screen_path(project)).hash(&mut h);
+    m.mic.hash(&mut h);
+    m.mic.as_ref().map(|r| file_stamp(&package.dir.join(r))).hash(&mut h);
+    hash_f64(&mut h, m.mic_offset_ms);
+    m.has_system_audio.hash(&mut h);
+    m.has_microphone.hash(&mut h);
+    m.system_track.hash(&mut h);
+    m.mic_track.hash(&mut h);
+    m.segments.len().hash(&mut h);
+    for seg in &m.segments {
+        seg.screen.hash(&mut h);
+        file_stamp(&package.dir.join(&seg.screen)).hash(&mut h);
+        hash_f64(&mut h, seg.offset_ms);
+        hash_f64(&mut h, seg.duration_ms);
+        seg.system_track.hash(&mut h);
+        seg.mic_track.hash(&mut h);
+    }
+
+    let sc = &project.scene;
+    sc.slices.len().hash(&mut h);
+    for s in &sc.slices {
+        hash_f64(&mut h, s.source_start_ms);
+        hash_f64(&mut h, s.source_end_ms);
+        hash_f64(&mut h, s.time_scale);
+        hash_f64(&mut h, s.volume);
+        s.freeze.hash(&mut h);
+        s.disabled.hash(&mut h);
+    }
+
+    sc.music_clips.len().hash(&mut h);
+    for c in &sc.music_clips {
+        c.file.hash(&mut h);
+        file_stamp(&package.dir.join(&c.file)).hash(&mut h);
+        hash_f64(&mut h, c.offset_ms);
+        hash_f64(&mut h, c.in_ms);
+        hash_f64(&mut h, c.dur_ms);
+        hash_f64(&mut h, c.fade_in_ms);
+        hash_f64(&mut h, c.fade_out_ms);
+    }
+
     let a = &project.config.audio;
-    let master = (a.volume.max(0.0) * 2.0) as f32;
+    (a.volume > 0.0).hash(&mut h);
+    hash_f64(&mut h, a.mic_volume);
+    hash_f64(&mut h, a.device_volume);
+    hash_f64(&mut h, a.music_volume);
+    a.mute_microphone.hash(&mut h);
+    a.mute_system_audio.hash(&mut h);
+    a.click_sounds.hash(&mut h);
+    a.click_style.hash(&mut h);
+    hash_f64(&mut h, a.click_volume);
+    a.key_sounds.hash(&mut h);
+    a.key_style.hash(&mut h);
+    hash_f64(&mut h, a.key_volume);
+    a.duck_music.hash(&mut h);
+    hash_f64(&mut h, a.duck_level);
+    a.noise_reduction.hash(&mut h);
+    hash_f64(&mut h, a.noise_reduction_strength);
+
+    if a.click_sounds {
+        track.clicks.len().hash(&mut h);
+        for c in &track.clicks {
+            hash_f64(&mut h, c.t_out_ms);
+        }
+    }
+    if a.key_sounds {
+        track.keys.len().hash(&mut h);
+        for k in &track.keys {
+            hash_f64(&mut h, k.t_out_ms);
+            k.kind.hash(&mut h);
+        }
+    }
+    h.finish()
+}
+
+pub fn cached_loudness(key: u64) -> Option<LoudnessReport> {
+    loudness_cache().lock().unwrap().get(&key).copied()
+}
+
+/// Measure integrated LUFS and true peak of the edited soundtrack before loudness normalization.
+pub fn measure_project_loudness(
+    package: &Package,
+    project: &Project,
+    track: &screencraft_core::track::RenderTrack,
+) -> Result<LoudnessReport, String> {
+    let key = audio_mix_fingerprint(package, project, track);
+    if let Some(rep) = cached_loudness(key) {
+        return Ok(rep);
+    }
+    let Some(mut st) = build_raw_soundtrack(package, project, track, true)? else {
+        let rep = LoudnessReport { integrated_lufs: None, true_peak_dbtp: f64::NEG_INFINITY };
+        loudness_cache().lock().unwrap().insert(key, rep);
+        return Ok(rep);
+    };
+    let total_ms = screencraft_core::timeline::output_duration_ms(&project.scene.slices);
+    let total_frames = ((total_ms / 1000.0) * RATE_HZ).ceil() as u64;
+    let mut meter = LoudnessMeter::new();
+    let mut done = 0u64;
+    while done < total_frames {
+        let n = (total_frames - done).min(48_000) as usize;
+        let pcm = st.render_unmastered(done, n);
+        meter.push(&pcm);
+        done += n as u64;
+    }
+    let stats = meter.finish();
+    let rep = LoudnessReport {
+        integrated_lufs: stats.integrated_lufs,
+        true_peak_dbtp: stats.true_peak_dbtp,
+    };
+    loudness_cache().lock().unwrap().insert(key, rep);
+    Ok(rep)
+}
+
+fn build_raw_soundtrack(
+    package: &Package,
+    project: &Project,
+    track: &screencraft_core::track::RenderTrack,
+    force_unity_master: bool,
+) -> Result<Option<Soundtrack>, String> {
+    let a = &project.config.audio;
+    let master = if force_unity_master || a.loudness_enabled {
+        if a.volume <= 0.0 {
+            0.0
+        } else {
+            1.0
+        }
+    } else {
+        (a.volume.max(0.0) * 2.0) as f32
+    };
     let recorded = project.media.has_system_audio || project.media.has_microphone || project.media.mic.is_some();
     let sc = &project.scene;
     let want_fx = a.click_sounds || a.key_sounds;
     if !recorded && sc.music_clips.is_empty() && !want_fx {
         return Ok(None);
     }
+    let strength = a.noise_reduction_strength.clamp(0.0, 1.0) as f32;
+    let denoise = a.noise_reduction && strength > 1e-4;
+    let has_mic = project.media.mic.is_some()
+        || project.media.mic_track.is_some()
+        || project.media.resolved_segments().iter().any(|s| s.mic_track.is_some());
+
     let mut lanes = Vec::new();
     let mut mic: Option<Arc<MicInfo>> = None;
     if recorded {
         if !a.mute_system_audio {
             if let Some(src) = crate::source::SegmentedAudioSource::open_system(package, project) {
-                lanes.push(Lane { source: Box::new(src), gain: master * a.device_volume as f32 });
+                let source: Box<dyn crate::audio_mix::PcmSource + Send> = if denoise && !has_mic {
+                    let profile = project_noise_profile(package, project, false);
+                    Box::new(DenoisedSource::new_stereo(src, profile, strength))
+                } else {
+                    Box::new(src)
+                };
+                lanes.push(Lane { source, gain: master * a.device_volume as f32 });
             }
         }
         if !a.mute_microphone {
@@ -264,14 +530,28 @@ pub fn build_soundtrack(package: &Package, project: &Project, track: &screencraf
                     }
                 }
                 let level = mic.as_ref().map(|m| m.gain).unwrap_or(1.0);
-                lanes.push(Lane { source: Box::new(MonoAvg(src)), gain: master * a.mic_volume as f32 * level });
+                let source: Box<dyn crate::audio_mix::PcmSource + Send> = if denoise {
+                    let profile = project_noise_profile(package, project, true);
+                    Box::new(DenoisedSource::new_mono(src, profile, strength))
+                } else {
+                    Box::new(MonoAvg(src))
+                };
+                lanes.push(Lane { source, gain: master * a.mic_volume as f32 * level });
             }
         }
     }
     // a separate microphone file from a 0.3 recording
     if let (None, Some(rel), false) = (project.media.mic_track, project.media.mic.as_deref(), a.mute_microphone) {
-        if let Some(pcm) = decode_music(&package.dir.join(rel)) {
-            lanes.push(Lane { source: Box::new(PcmFile { pcm, offset_ms: project.media.mic_offset_ms }), gain: master * a.mic_volume as f32 * 4.0 });
+        let mic_path = package.dir.join(rel);
+        if let Some(pcm) = decode_music(&mic_path) {
+            let pcm_file = PcmFile { pcm: pcm.clone(), offset_ms: project.media.mic_offset_ms };
+            let source: Box<dyn crate::audio_mix::PcmSource + Send> = if denoise {
+                let profile = SegmentedNoiseProfile::from_single(estimate_pcm_noise_profile(&mic_path, &pcm));
+                Box::new(DenoisedSource::new_mono(pcm_file, profile, strength))
+            } else {
+                Box::new(pcm_file)
+            };
+            lanes.push(Lane { source, gain: master * a.mic_volume as f32 * 4.0 });
         }
     }
     let mut extras = crate::audio_mix::Extras { music_gain: master * a.music_volume as f32, duck_level: a.duck_level as f32, ..Default::default() };
@@ -310,6 +590,48 @@ pub fn build_soundtrack(package: &Package, project: &Project, track: &screencraf
         return Ok(None);
     }
     Ok(Some(Soundtrack::new(project, lanes).with_extras(extras)))
+}
+
+fn build_soundtrack_inner(
+    package: &Package,
+    project: &Project,
+    track: &screencraft_core::track::RenderTrack,
+    allow_sync_measure: bool,
+) -> Result<Option<Soundtrack>, String> {
+    let Some(mut st) = build_raw_soundtrack(package, project, track, false)? else {
+        return Ok(None);
+    };
+    let a = &project.config.audio;
+    if a.loudness_enabled && a.volume > 0.0 {
+        let key = audio_mix_fingerprint(package, project, track);
+        let rep = match cached_loudness(key) {
+            Some(r) => Some(r),
+            None if allow_sync_measure => Some(measure_project_loudness(package, project, track)?),
+            None => None,
+        };
+        if let Some(r) = rep {
+            if r.integrated_lufs.is_some() {
+                let gain = makeup_gain(r.integrated_lufs, a.loudness_lufs);
+                let _ = (MAX_BOOST_DB, MAX_CUT_DB);
+                st = st.with_loudness(gain, TRUE_PEAK_CEILING_DBTP);
+            }
+        }
+    }
+    Ok(Some(st))
+}
+
+/// The edited soundtrack of a project: every audio track of `screen.mp4` through the cuts,
+/// speeds and volumes, plus music (fades, ducking under speech), click / typing effects,
+/// optional noise reduction, and optional LUFS loudness normalization.
+/// `None` when nothing audible is in the project.
+pub fn build_soundtrack(package: &Package, project: &Project, track: &screencraft_core::track::RenderTrack) -> Result<Option<Soundtrack>, String> {
+    build_soundtrack_inner(package, project, track, true)
+}
+
+/// Non-blocking variant of [`build_soundtrack`] for UI preview playback: applies cached loudness
+/// measurements without blocking the UI thread when analysis is still running.
+pub fn build_soundtrack_preview(package: &Package, project: &Project, track: &screencraft_core::track::RenderTrack) -> Result<Option<Soundtrack>, String> {
+    build_soundtrack_inner(package, project, track, false)
 }
 
 type FrameRx = std::sync::mpsc::Receiver<Result<crate::source::Frames, String>>;

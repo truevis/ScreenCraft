@@ -23,6 +23,7 @@ pub struct PanelState {
     pub space_was_playing: bool,
     pub pace: pace::PaceOpts,
     pub caps: captions::CapState,
+    pub audio: audio::AudioPanelState,
 }
 
 impl Default for PanelState {
@@ -33,6 +34,7 @@ impl Default for PanelState {
             space_was_playing: false,
             pace: pace::PaceOpts::default(),
             caps: captions::CapState::default(),
+            audio: audio::AudioPanelState::default(),
         }
     }
 }
@@ -40,6 +42,7 @@ impl Default for PanelState {
 impl PanelState {
     pub fn poll(&mut self, ctx: &egui::Context) {
         self.caps.poll(ctx);
+        self.audio.poll(ctx);
     }
 }
 

@@ -18,7 +18,11 @@ pub mod source;
 pub mod whisper;
 
 pub use gif::{export_gif, GifReport};
-pub use export::{build_soundtrack, decode_music, mic_speech, export_project, render_frame_at, ExportOptions, ExportReport};
+pub use export::{
+    audio_mix_fingerprint, build_soundtrack, build_soundtrack_preview, cached_loudness, decode_music,
+    export_project, measure_project_loudness, mic_speech, render_frame_at, ExportOptions, ExportReport,
+    LoudnessReport,
+};
 pub use package::Package;
 pub use recorder::{CameraSpec, Finished, LiveStats, RecordOptions, Recording};
 pub use source::{AudioSource, FrameTable, Frames, MultiSource, SegmentedAudioSource, VideoSource};

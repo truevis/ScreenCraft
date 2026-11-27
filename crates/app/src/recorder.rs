@@ -184,6 +184,10 @@ pub struct Menu {
     pub items: Vec<MenuItem>,
     /// Left edge of the menu within the bar window.
     pub left: f32,
+    pub gen: u64,
+    pub opened_at: Instant,
+    pub seen_focus: bool,
+    pub lost_focus_at: Option<Instant>,
 }
 
 /// What the bar asks the application to do.
@@ -236,6 +240,7 @@ pub struct Recorder {
     ctx: egui::Context,
     pub controller: Controller,
     pub menu: Option<Menu>,
+    menu_gen: u64,
     last_menu_close: Option<(MenuKind, Instant)>,
     pub live: crate::live::Live,
     idle_w: Option<f32>,
@@ -280,6 +285,7 @@ impl Recorder {
             ctx: ctx.clone(),
             controller: Controller::spawn(ctx.clone()),
             menu: None,
+            menu_gen: 0,
             last_menu_close: None,
             live: crate::live::Live::new(ctx),
             idle_w: None,
@@ -440,9 +446,8 @@ impl Recorder {
 
     /// The window size the current phase wants (the bar stays anchored at its bottom centre).
     pub fn window_size(&self, screen_w: f32, camera: bool) -> Vec2 {
-        let menu_h = self.menu.as_ref().map(|m| menu_height(m) + 8.0 + 10.0).unwrap_or(0.0);
         match self.phase {
-            Phase::Idle | Phase::Starting => Vec2::new(self.bar_width().min(screen_w - 24.0), BAR_H + menu_h),
+            Phase::Idle | Phase::Starting => Vec2::new(self.bar_width().min(screen_w - 24.0), BAR_H),
             Phase::Countdown => Vec2::new(240.0, 60.0),
             Phase::Recording | Phase::Finishing => Vec2::new(if camera { 430.0 } else { 390.0 }, 60.0),
             Phase::Confirm => Vec2::new(420.0, 60.0),
@@ -450,13 +455,22 @@ impl Recorder {
     }
 
     /// A menu for screenshots, without clicking.
-    pub fn menu_for_dev(&self, kind: MenuKind, prefs: &Prefs) -> Menu {
+    pub fn menu_for_dev(&mut self, kind: MenuKind, prefs: &Prefs) -> Menu {
         let items = match kind {
             MenuKind::Quality => self.quality_items(prefs),
             MenuKind::Sys => self.sys_items(prefs),
             _ => self.folder_items(prefs),
         };
-        Menu { kind, items, left: 640.0 }
+        self.menu_gen += 1;
+        Menu {
+            kind,
+            items,
+            left: 640.0,
+            gen: self.menu_gen,
+            opened_at: Instant::now(),
+            seen_focus: false,
+            lost_focus_at: None,
+        }
     }
 
     pub fn close_menu(&mut self) {
@@ -472,7 +486,16 @@ impl Recorder {
                 return;
             }
         }
-        self.menu = Some(Menu { kind, items, left });
+        self.menu_gen += 1;
+        self.menu = Some(Menu {
+            kind,
+            items,
+            left,
+            gen: self.menu_gen,
+            opened_at: Instant::now(),
+            seen_focus: false,
+            lost_focus_at: None,
+        });
     }
 
     fn toggle_menu(&mut self, kind: MenuKind, items: Vec<MenuItem>, left: f32) {
@@ -677,7 +700,7 @@ impl Recorder {
     // ---- drawing --------------------------------------------------------------------------
 
     /// Draw the whole window content. `ui` is the root ui of the bar window.
-    pub fn show(&mut self, ui: &mut egui::Ui, prefs: &mut Prefs) -> Action {
+    pub fn show(&mut self, ui: &mut egui::Ui, prefs: &mut Prefs, draw_menu_inline: bool) -> Action {
         let mut action = Action::None;
         let full = ui.max_rect();
         let bar_h = if matches!(self.phase, Phase::Idle | Phase::Starting) { BAR_H } else { 60.0 };
@@ -689,7 +712,8 @@ impl Recorder {
         painter.rect_stroke(bar, CornerRadius::same(14), Stroke::new(1.0, LINE_2), StrokeKind::Inside);
 
         // drag the bar anywhere you like by its background (the buttons drawn after this sit on top)
-        let grab = ui.interact(bar, ui.id().with("bar-drag"), Sense::drag());
+        let menu_before = self.menu.as_ref().map(|m| m.gen);
+        let grab = ui.interact(bar, ui.id().with("bar-drag"), Sense::click_and_drag());
         if grab.drag_started() {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
         }
@@ -708,11 +732,21 @@ impl Recorder {
             Phase::Recording | Phase::Finishing => action = self.draw_hud(ui, bar, prefs),
             Phase::Confirm => action = self.draw_confirm(ui, bar),
         }
-        // menu above the bar
+        // menu above the bar (inline in headless screenshots/tests, or in its own opaque popup viewport)
         if self.phase == Phase::Idle {
-            let a = self.draw_menu(ui, full, bar, prefs);
-            if !matches!(a, Action::None) {
-                action = a;
+            if draw_menu_inline {
+                let a = self.draw_menu(ui, full, bar, prefs);
+                if !matches!(a, Action::None) {
+                    action = a;
+                }
+            } else if menu_before.is_some()
+                && self.menu.as_ref().map(|m| m.gen) == menu_before
+                && (grab.clicked() || grab.drag_started())
+            {
+                self.close_menu();
+                if matches!(action, Action::None) {
+                    action = Action::HoverWindow(None);
+                }
             }
         }
         // error toast over the bar
@@ -988,10 +1022,9 @@ impl Recorder {
         }
     }
 
-    /// The drop-up menu, rebuilt from live data each frame it is open (device lists arrive late).
-    fn draw_menu(&mut self, ui: &mut egui::Ui, full: Rect, bar: Rect, prefs: &mut Prefs) -> Action {
-        let Some(kind) = self.menu.as_ref().map(|m| m.kind) else { return Action::None };
-        // refresh the items that depend on late-arriving lists
+    /// Refresh live-arriving items (camera, mic, system audio, quality) in the currently open menu.
+    pub fn refresh_menu(&mut self, prefs: &Prefs) {
+        let Some(kind) = self.menu.as_ref().map(|m| m.kind) else { return };
         let items = match kind {
             MenuKind::Camera => Some(self.camera_items(prefs)),
             MenuKind::Mic => Some(self.mic_items(prefs)),
@@ -1002,21 +1035,20 @@ impl Recorder {
         if let (Some(items), Some(m)) = (items, self.menu.as_mut()) {
             m.items = items;
         }
-        let Some(menu) = self.menu.as_ref() else { return Action::None };
-        let h = menu_height(menu);
-        let w = menu_width(ui, menu);
-        let left = (full.min.x + menu.left).min(full.max.x - w - 8.0).max(full.min.x + 8.0);
-        let rect = Rect::from_min_size(Pos2::new(left, bar.min.y - 8.0 - h), Vec2::new(w, h));
-        ui.painter().rect_filled(rect.translate(Vec2::new(0.0, 8.0)).expand(2.0), CornerRadius::same(13), Color32::from_black_alpha(60));
-        ui.painter().rect_filled(rect, CornerRadius::same(11), Color32::from_rgba_unmultiplied(13, 19, 30, 250));
-        ui.painter().rect_stroke(rect, CornerRadius::same(11), Stroke::new(1.0, LINE_2), StrokeKind::Inside);
+    }
+
+    pub fn menu_size(&self, ui: &egui::Ui, max_h: f32) -> Option<Vec2> {
+        self.menu.as_ref().map(|m| Vec2::new(menu_width(ui, m), menu_height(m, max_h)))
+    }
+
+    /// Paint menu items inside `rect` and return `(picked_action, hovered_window_id)`.
+    pub fn paint_menu_items(ui: &mut egui::Ui, rect: Rect, items: &[MenuItem]) -> (Option<MenuAction>, Option<u32>) {
         let mut picked: Option<MenuAction> = None;
         let mut hover_window: Option<u32> = None;
-        let items = menu.items.clone();
-        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink(6.0)));
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(&mut child, |ui| {
             ui.spacing_mut().item_spacing = Vec2::ZERO;
-            for it in &items {
+            for it in items {
                 match it {
                     MenuItem::Header(t) => {
                         let (r, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 25.0), Sense::hover());
@@ -1046,6 +1078,23 @@ impl Recorder {
                 }
             }
         });
+        (picked, hover_window)
+    }
+
+    /// The drop-up menu drawn inline inside `full` (used in headless mode).
+    fn draw_menu(&mut self, ui: &mut egui::Ui, full: Rect, bar: Rect, prefs: &mut Prefs) -> Action {
+        self.refresh_menu(prefs);
+        let Some(menu) = self.menu.as_ref() else { return Action::None };
+        let h = menu_height(menu, 300.0);
+        let w = menu_width(ui, menu);
+        let left = (full.min.x + menu.left).min(full.max.x - w - 8.0).max(full.min.x + 8.0);
+        let rect = Rect::from_min_size(Pos2::new(left, bar.min.y - 8.0 - h), Vec2::new(w, h));
+        ui.painter().rect_filled(rect.translate(Vec2::new(0.0, 8.0)).expand(2.0), CornerRadius::same(13), Color32::from_black_alpha(60));
+        ui.painter().rect_filled(rect, CornerRadius::same(11), Color32::from_rgba_unmultiplied(13, 19, 30, 250));
+        ui.painter().rect_stroke(rect, CornerRadius::same(11), Stroke::new(1.0, LINE_2), StrokeKind::Inside);
+        let kind = menu.kind;
+        let items = menu.items.clone();
+        let (picked, hover_window) = Self::paint_menu_items(ui, rect.shrink(6.0), &items);
         let mut action = Action::None;
         if let Some(a) = picked {
             self.close_menu();
@@ -1307,7 +1356,7 @@ fn opt_button_icon_right(ui: &mut egui::Ui, at: Pos2, label: &str, icon: &str) -
     (r, resp)
 }
 
-fn menu_height(m: &Menu) -> f32 {
+fn menu_height(m: &Menu, max_h: f32) -> f32 {
     let content: f32 = m
         .items
         .iter()
@@ -1322,7 +1371,7 @@ fn menu_height(m: &Menu) -> f32 {
             }
         })
         .sum();
-    content.min(300.0) + 12.0
+    content.min(max_h.clamp(160.0, 380.0)) + 12.0
 }
 
 fn menu_width(ui: &egui::Ui, m: &Menu) -> f32 {
@@ -1347,7 +1396,12 @@ fn format_time(secs: u64) -> String {
     } else if ago < 86_400 {
         format!("{} h ago", ago / 3600)
     } else {
-        format!("{} days ago", ago / 86_400)
+        let days = ago / 86_400;
+        if days == 1 {
+            "1 day ago".into()
+        } else {
+            format!("{days} days ago")
+        }
     }
 }
 
@@ -1372,4 +1426,20 @@ pub fn timestamp() -> String {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     format!("{y:04}-{m:02}-{d:02} {:02}.{:02}.{:02}", rem / 3600, (rem % 3600) / 60, rem % 60)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bar_window_size_stays_compact_with_menu_open() {
+        let ctx = egui::Context::default();
+        let prefs = Prefs::default();
+        let mut rec = Recorder::new(&ctx, &prefs);
+        assert_eq!(rec.window_size(1920.0, false).y, BAR_H);
+        rec.menu = Some(rec.menu_for_dev(MenuKind::Folder, &prefs));
+        assert_eq!(rec.window_size(1920.0, false).y, BAR_H);
+        assert_eq!(rec.window_size(1920.0, true).y, BAR_H);
+    }
 }

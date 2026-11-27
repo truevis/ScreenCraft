@@ -18,7 +18,7 @@ use screencraft_core::input::InputLog;
 use screencraft_core::project::Project;
 use screencraft_core::timeline::{display_to_effective, effective_duration_ms, effective_to_display, output_to_source};
 use screencraft_core::track::{compute_track, RenderTrack};
-use screencraft_engine::{build_soundtrack, FrameTable, Package};
+use screencraft_engine::{build_soundtrack_preview, FrameTable, Package};
 use screencraft_render::{build_scene_in, output_size, Compositor, Slot};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -574,7 +574,7 @@ impl EditorState {
                 }
                 let track = if has_cuts { self.eff_track.as_ref().unwrap_or(&self.track) } else { &self.track };
                 let start = self.to_play(self.playhead_ms);
-                if let Ok(Some(st)) = build_soundtrack(&self.package, &eff, track) {
+                if let Ok(Some(st)) = build_soundtrack_preview(&self.package, &eff, track) {
                     if let Some(a) = self.audio.as_mut() {
                         a.play(st, start);
                         self.audio_clock = self.rate == 1.0;
@@ -663,7 +663,98 @@ impl EditorState {
         }
         self.export.poll(ctx);
         self.panel.poll(ctx);
+        self.sync_loudness_analysis(ctx);
         self.take_caption_results();
+    }
+
+    fn sync_loudness_analysis(&mut self, ctx: &egui::Context) {
+        if self.panel.audio.just_finished {
+            self.panel.audio.just_finished = false;
+            if self.playing && self.project.config.audio.loudness_enabled {
+                self.restart_audio();
+            }
+        }
+        if !self.project.config.audio.loudness_enabled || self.project.config.audio.volume <= 0.0 {
+            self.panel.audio.pending_key = None;
+            return;
+        }
+        if self.panel.audio.last_checked_rev == self.project_rev && self.panel.audio.pending_key.is_none() {
+            return;
+        }
+
+        self.ensure_track();
+        let eff = self.project.effective();
+        let has_cuts = eff.scene.slices.len() != self.project.scene.slices.len();
+        if has_cuts && self.eff_track.is_none() {
+            self.eff_track = Some(compute_track(&eff, &self.input, TRACK_FPS));
+        }
+        let key = {
+            let track = if has_cuts { self.eff_track.as_ref().unwrap_or(&self.track) } else { &self.track };
+            screencraft_engine::audio_mix_fingerprint(&self.package, &eff, track)
+        };
+        self.panel.audio.current_key = Some(key);
+
+        if let Some(rep) = screencraft_engine::cached_loudness(key) {
+            self.panel.audio.last_report = Some((key, rep));
+            self.panel.audio.error = None;
+            self.panel.audio.pending_key = None;
+            self.panel.audio.last_checked_rev = self.project_rev;
+            return;
+        }
+        if self.panel.audio.in_flight_key == Some(key) {
+            self.panel.audio.pending_key = None;
+            self.panel.audio.last_checked_rev = self.project_rev;
+            return;
+        }
+        if self.panel.audio.busy {
+            self.panel.audio.pending_key = Some((key, Instant::now()));
+            return;
+        }
+
+        let should_spawn = if self.panel.audio.last_report.is_some() {
+            match self.panel.audio.pending_key {
+                Some((k, since)) if k == key => {
+                    if since.elapsed() >= Duration::from_millis(200) {
+                        true
+                    } else {
+                        ctx.request_repaint_after(Duration::from_millis(50));
+                        false
+                    }
+                }
+                _ => {
+                    self.panel.audio.pending_key = Some((key, Instant::now()));
+                    ctx.request_repaint_after(Duration::from_millis(200));
+                    false
+                }
+            }
+        } else {
+            true
+        };
+        if !should_spawn {
+            return;
+        }
+
+        self.panel.audio.pending_key = None;
+        self.panel.audio.last_checked_rev = self.project_rev;
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.panel.audio.rx = Some(rx);
+        self.panel.audio.busy = true;
+        self.panel.audio.in_flight_key = Some(key);
+        let pkg = self.package.clone();
+        let track = if has_cuts {
+            self.eff_track.as_ref().unwrap_or(&self.track).clone()
+        } else {
+            self.track.clone()
+        };
+        let ctx = ctx.clone();
+        std::thread::Builder::new()
+            .name("screencraft-loudness".into())
+            .spawn(move || {
+                let res = screencraft_engine::measure_project_loudness(&pkg, &eff, &track);
+                let _ = tx.send((key, res));
+                ctx.request_repaint();
+            })
+            .ok();
     }
 
     /// Waveform of a music file, decoded in the background the first time it is asked for.

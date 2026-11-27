@@ -98,6 +98,9 @@ Intel + NVIDIA graphics and high-DPI displays.
 - **Local MCP server (`screencraft-mcp`):** standalone stdio JSON-RPC server installed beside
   `ScreenCraft.exe` so coding agents can record, inspect transcripts, edit timelines, preview
   frames, and export videos without bloating the GUI app.
+- **Loudness target & background noise reduction:** one-click loudness normalization in the Audio
+  tab (YouTube `-14 LUFS`, Podcast `-16 LUFS`, Broadcast `-23 LUFS`, or custom target with a
+  `-1.0 dBTP` true-peak limiter) and spectral noise reduction for steady fan noise, hum, and hiss.
 - The built-in update check is removed.
 
 **Build tooling**
@@ -157,7 +160,10 @@ The recorder bar:
   **transcript editing** (cut words, filler words, or pause gaps straight from the transcript, or
   restore them any time), SRT import / export, and Subtitle / Minimal / TikTok styles.
 - **Transitions** at cuts: dissolve, fade, flash, blur, slide, zoom.
-- **Audio:** levels, **music** clips with fades and ducking under speech, and click / typing **sound effects**.
+- **Audio:** levels, **loudness target** normalization (YouTube `-14 LUFS`, Podcast `-16 LUFS`,
+  Broadcast `-23 LUFS` with `-1.0 dBTP` ceiling limiter), **background noise reduction** for fans,
+  hum, and hiss, **music** clips with fades and ducking under speech, and click / typing **sound
+  effects**.
 - **Crop, aspect ratio, presets, undo / redo and raw-file access.**
 
 **Defaults for app demos.** A new project fills the frame edge to edge on solid black (padding,
@@ -249,7 +255,7 @@ Exposed tools:
 | --- | --- |
 | `screencraft-core` (`crates/core`) | Pure Rust: project model, spring physics, timeline mapping, auto-zoom generation, per-frame camera / cursor render track. |
 | `screencraft-capture` | DXGI Desktop Duplication screen capture, constant-frame-rate resampler, cursor / click / key logging. |
-| `screencraft-audio` | WASAPI (via `cpal`) microphone and loopback streams on a shared clock, and the pure `StreamAligner` that turns timestamped blocks into gap-free 48 kHz stereo. |
+| `screencraft-audio` | WASAPI (via `cpal`) microphone and loopback streams on a shared clock, the pure `StreamAligner` that turns timestamped blocks into gap-free 48 kHz stereo, spectral noise reduction, and LUFS loudness normalization / true-peak limiting. |
 | `screencraft-encode` | Sans-I/O: BGRA to I420, AV1 / VP9 and Opus encoders, Windows Media Foundation H.264, MP4 and WebM muxers that emit `WriteAt` operations, an MP4 demuxer (including fragmented MP4) and the `Exporter` state machine. |
 | `screencraft-render` | The wgpu compositor (WGSL), the CPU-side scene builder and the tiny-skia overlays (device frames, annotations, captions). Shared by the preview and the exporter. |
 | `screencraft-engine` | The recording session (screen, audio, camera), project packages, frame / audio sources, the soundtrack mixer, and the export, GIF and compressor jobs. |
